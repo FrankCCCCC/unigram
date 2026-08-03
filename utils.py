@@ -1,48 +1,18 @@
-class Recorder:
-    def __init__(self):
-        self.history_dict = {}
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-    def add(self, name: str, step: int, val):
-        if isinstance(val, torch.Tensor):
-            val = float(val.detach().cpu())
-        else:
-            val = float(val)
-        self.history_dict.setdefault(name, []).append((int(step), val))
-
-    def get_items(self, name: str):
-        return self.history_dict.get(name, [])
-
-    def get_series(self, name: str):
-        items = self.get_items(name)
-        if not items:
-            return [], []
-        steps, values = zip(*items)
-        return list(steps), list(values)
-
-    def last_step(self, name: str):
-        items = self.get_items(name)
-        if not items:
-            return 0
-        return int(items[-1][0])
-
-    def get_keys(self):
-        return self.history_dict.keys()
-
-    def to_dict(self):
-        return {
-            name: [
-                {"step": int(step), "value": float(value)}
-                for step, value in items
-            ]
-            for name, items in self.history_dict.items()
-        }
-
-    def save(self, file):
-        file = Path(file)
-        file.parent.mkdir(parents=True, exist_ok=True)
-        with file.open("w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
-        return file
+def save_results(res, folder, file_name: str = "test_metrics.json"):
+    output_path = Path(folder) / file_name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = {}
+    if res:
+        metrics = {name: float(value) for name, value in res[0].items()}
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    return output_path
 
 class TaskMgr:
     FINISHED_FILE: str = "finished.json"

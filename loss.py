@@ -1,3 +1,8 @@
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
 
@@ -33,25 +38,6 @@ class HyperBridge:
         chi2 = torch.distributions.Gamma(concentration, rate).sample()
         # print(f"chi2: {isnan_or_inf(chi2).any()}")
         return chi2.sqrt()
-
-    @staticmethod
-    def sample_chi_old(ns,dtype=torch.float64):
-        nshape = ns.shape
-        ns = ns.reshape(-1)
-        M = ns.sum().item()
-        x = torch.randn(M, device=ns.device, dtype=dtype).square()
-        chi2 = torch.segment_reduce(x,'sum',lengths=ns)
-        return chi2.sqrt().reshape(nshape)
-
-    @staticmethod
-    def binary_bridge_old(ts):
-        ns = torch.poisson(ts/8).to(torch.int64)
-        ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
-        vs = torch.rand_like(ts)
-        ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
-        us = torch.rand_like(ts)
-        thetas = 2 * torch.atan((-ps).exp() * torch.tan(torch.pi * (us - 0.5)))
-        return (ps,thetas)
 
     @staticmethod
     def _vocab_angles(
@@ -140,19 +126,33 @@ class HyperBridge:
         # print(f"phis ({phis.mean().item()}): {torch.isfinite(phis).all().item()}")
         alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
         # print(f"alphas: {torch.isfinite(alphas).all().item()}")
-        cos_alphas = alphas.cos()
         sin_alphas = alphas.sin()
-        log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
-        # print(f"cos_alphas ({cos_alphas.mean().item()}): {torch.isfinite(cos_alphas).all().item()}")
         # print(f"sin_alphas ({sin_alphas.mean().item()}): {torch.isfinite(sin_alphas).all().item()}")
-        # print(f"1 - cos_alphas ({(1 - cos_alphas).mean().item()}): {torch.isfinite(1 - cos_alphas).all().item()}")
-        # print(f"1 + cos_alphas ({(1 + cos_alphas).mean().item()}): {torch.isfinite(1 + cos_alphas).all().item()}")
-        horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
+        # Everything below is written via the half-angle identities
+        # 1 - cos(a) = 2 sin^2(a/2) and 1 + cos(a) = 2 cos^2(a/2). The direct
+        # forms cancel catastrophically at large rho, where the bridge angle is
+        # absorbed by phi_v and a == 0 exactly: (1 - cos a) is then 0 rather than
+        # a^2/2, so its log is -inf and the backward pass evaluates 0 * inf = NaN.
+        half_alphas = alphas / 2
+        sin_half_sq = half_alphas.sin().square()
+        cos_half_sq = half_alphas.cos().square()
+        # log2 - log((1 - cos a) e^rho + (1 + cos a) e^-rho), with e^rho pulled
+        # out of the log so nothing overflows.
+        horosphere_dists = -rhos[:,None] - (
+            sin_half_sq + cos_half_sq * (-2 * rhos[:,None]).exp()
+        ).log()
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
         mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
-        # next, we transform the angles alpha after motion by rho
-        betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
+        # next, we transform the angles alpha after motion by rho.
+        # cosh(rho) cos(a) - sinh(rho), again cancellation-free: the direct form
+        # collapses to cosh(rho) - sinh(rho), which is 0 in float64 once
+        # rho > ~19 even though the true value is e^-rho, and atan2(0, 0) has no
+        # gradient.
+        betas = torch.atan2(
+            sin_alphas,
+            cos_half_sq * (-rhos[:,None]).exp() - sin_half_sq * rhos[:,None].exp(),
+        )
         cos_errors = (betas.cos() * mu).sum(-1)
         sin_errors = (betas.sin() * mu).sum(-1)
         return (cos_errors.square() + sin_errors.square())/2
@@ -192,77 +192,6 @@ class HyperBridge:
         sin_errors = (betas.sin() * mu).sum(-1)
         return (cos_errors.square() + sin_errors.square())/2
 
-    # ---- Cartesian bridge loss ----------------------------------------------
-    # Implements the formula directly, term-by-term:
-    #   L(theta; y) = (d-1)^2 / 2 * (1 - ||z_t||^2)^2
-    #                 * ||  (y - z_t) / ||y - z_t||^2
-    #                     - E_{v ~ mu^theta(.|z_t)}[ (v - z_t) / ||v - z_t||^2 ]  ||^2
-    # with mu^theta_v(z_t) = softmax_v( (d-1) h(z_t, v) + logits_v ),
-    #      h(z_t, v)       = log[ (1 - ||z_t||^2) / ||v - z_t||^2 ].
-    # The "_weighted" variant replaces the target (y - z_t)/||y - z_t||^2 with
-    # E_{v ~ mu^*(.|z_t)}[(v - z_t)/||v - z_t||^2], where mu^* is the true Bayes
-    # posterior softmax((d-1) h + log_ps).
-
-    @staticmethod
-    def _poincare_disk_cartesian_geometry(rhos, thetas, V):
-        """Returns (z, v, diff, sq, one_minus_zz, h) used by every variant."""
-        z = polar_to_cart(rhos, thetas)                                  # (N, 2)
-        v = vocab_points(V, rhos.device, rhos.dtype)                     # (V, 2)
-        diff = v - z.unsqueeze(-2)                                       # (N, V, 2)
-        sq   = diff.square().sum(-1)                                     # (N, V)
-        one_minus_zz = 1 - z.square().sum(-1, keepdim=True)              # (N, 1)
-        h    = (one_minus_zz / sq).log()                                 # (N, V)
-        return z, v, diff, sq, one_minus_zz, h
-
-    @staticmethod
-    def _poincare_disk_expected_radial(mu, diff, sq):
-        """E_{v ~ mu}[ (v - z) / ||v - z||^2 ]  =  sum_v mu_v (v-z)/||v-z||^2."""
-        return (mu / sq).unsqueeze(-1).mul(diff).sum(-2)                 # (N, 2)
-
-    @staticmethod
-    def _poincare_disk_cartesian_squared_residual(target, model, one_minus_zz, d=2):
-        """L = (d-1)^2 / 2 * (1 - ||z||^2)^2 * ||target - model||^2."""
-        residual = target - model                                        # (N, 2)
-        return (d - 1) ** 2 / 2 * one_minus_zz.squeeze(-1).square() \
-               * residual.square().sum(-1)
-
-    @staticmethod
-    def binary_bridge_loss_poincare_disk_cartesian(logits, targets, rhos, thetas):
-        V, d = logits.shape[-1], 2
-        z, v, diff, sq, one_minus_zz, h = HyperBridge._poincare_disk_cartesian_geometry(rhos, thetas, V)
-
-        # target term: (y - z) / ||y - z||^2
-        y_minus_z = v[targets] - z                                       # (N, 2)
-        target = y_minus_z / y_minus_z.square().sum(-1, keepdim=True)    # (N, 2)
-
-        # model term: E_{v ~ mu^theta(.|z)}[ (v - z) / ||v - z||^2 ]
-        mu = ((d - 1) * h + logits.to(torch.float64)).softmax(-1)        # (N, V)
-        model = HyperBridge._poincare_disk_expected_radial(mu, diff, sq)               # (N, 2)
-
-        return HyperBridge._poincare_disk_cartesian_squared_residual(target, model, one_minus_zz, d=d)
-
-    @staticmethod
-    def _lorentz_boundary_points(V, device, dtype):
-        phis = (torch.arange(V, device=device, dtype=dtype) + 0.5) * (2 * torch.pi / V)
-        return torch.stack([torch.ones_like(phis), phis.cos(), phis.sin()], dim=-1)
-
-    @staticmethod
-    def _lorentz_inner(x, y):
-        return -x[..., 0] * y[..., 0] + (x[..., 1:] * y[..., 1:]).sum(-1)
-
-    @staticmethod
-    def _lorentz_geometry(rhos, thetas, V, d):
-        z = HyperBridge.polar_to_lorentz(rhos, thetas)                   # (N, d+1)
-        xi = HyperBridge._lorentz_boundary_points(V, rhos.device, rhos.dtype)
-        inner = HyperBridge._lorentz_inner(z[:, None, :], xi[None, :, :]) # (N, V), negative
-        log_poisson = (d - 1) *  (-(-inner).clamp_min(1e-300).log())     # (d - 1) * log 1 / (-<z,xi(y)>)
-        directions = xi[None, :, :] / inner[:, :, None]                  # xi(y) / <z,xi(y)>
-        return directions, log_poisson
-
-    @staticmethod
-    def _lorentz_norm_sq(x):
-        return HyperBridge._lorentz_inner(x, x).clamp_min(0)
-
 class Loss:
     @staticmethod
     def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
@@ -280,11 +209,25 @@ class Loss:
                 word_embedding=word_embedding,
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
-            bridge = HyperBridge.binary_bridge_loss_crossentropy(
+            bridge = Loss.binary_bridge_loss_crossentropy(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
+            )
+        else:
+            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
+        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
+
+    @staticmethod
+    def weighted_binary_nelbo(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
             )
         else:
             raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
@@ -381,7 +324,7 @@ class Proposal:
         unif_min = float(max(dt, 1e-8))
         unif_max = float(max(total_time, unif_min))
 
-        ts, proposal_weight = HyperBridge.proposal(
+        ts, proposal_weight = Proposal.proposal(
             proposal_type=proposal_type,
             shape=shape,
             device=device,

@@ -1,9 +1,29 @@
+from typing import Optional
+
+import hydra
+import lightning as L
+import torch
+from omegaconf import DictConfig
+
+from dataset import UnigramDataModule, process_ps
+from loss import FlowPath, HyperBridge, Loss, LossGeometry, Proposal
+from model import MLPLM, OptimalModel
+from utils import TaskMgr, save_results
+from visualizer import DataMgr, Recorder
+
 class HyperbolicDLM(L.LightningModule):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
         self.bridge = HyperBridge()
         self.recorder = Recorder()
+
+        self.loss_geometry = config.loss_geometry
+        self.model_input_dim = config.hyper_dim
+        # If False the per-word boundary angles phi_v stay fixed at (v+0.5)*2*pi/V
+        # instead of being read off the lm-head; the lm-head still trains as the
+        # logit readout. See the word_embedding property.
+        self.trainable_word_embedding = config.trainable_word_embedding
 
         if self.config.mode == "tnb":
             self.model = MLPLM(
@@ -23,6 +43,28 @@ class HyperbolicDLM(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=float(self.config.lr))
 
+    @property
+    def word_embedding(self) -> Optional[torch.Tensor]:
+        # Learnable boundary embedding (lm-head weights, shape (V, hyper_dim)) used to
+        # define each word's boundary angle phi_v = atan2(e_v). Returns None — so the
+        # bridge and loss fall back to fixed equally-spaced angles — when the backbone
+        # has no such table (e.g. OptimalModel) OR when trainable_word_embedding is
+        # False.
+        if not self.trainable_word_embedding:
+            return None
+        head = getattr(self.model, "lm_head", None)
+        return head.weight if head is not None else None
+
+    def _make_step_generator(self, salt: int) -> torch.Generator:
+        """Per-step, per-path torch.Generator on self.device."""
+        STEP_STRIDE = 1_000_003
+        seed_value = (
+            self.config.seed * STEP_STRIDE
+            + int(self.global_step) * 2
+            + int(salt)
+        ) & 0x7FFF_FFFF_FFFF_FFFF
+        return torch.Generator(device=self.device).manual_seed(seed_value)
+
     def get_logits_inputs(
         self,
         batch_size: int,
@@ -36,7 +78,7 @@ class HyperbolicDLM(L.LightningModule):
         device: torch.device,
         generator: Optional[torch.Generator] = None,
     ):
-        ts, proposal_weight = self.bridge.hyper_proposal(
+        ts, proposal_weight = Proposal.hyper_proposal(
             proposal_type=proposal_type,
             shape=(batch_size,),
             device=device,
@@ -90,7 +132,7 @@ class HyperbolicDLM(L.LightningModule):
             device=self.device,
             generator=loss_gen,
         )
-        wloss, loss = self.bridge.weighted_binary_loss(
+        wloss, loss = Loss.weighted_binary_loss(
             logits=loss_logits,
             targets=targets,
             rhos=rhos_loss,
@@ -124,7 +166,7 @@ class HyperbolicDLM(L.LightningModule):
                 device=self.device,
                 generator=nelbo_gen,
             )
-            wnelbo, nelbo = self.bridge.weighted_binary_nelbo(
+            wnelbo, nelbo = Loss.weighted_binary_nelbo(
                 logits=nelbo_logits,
                 targets=targets,
                 rhos=rhos_nelbo,
@@ -143,28 +185,47 @@ class HyperbolicDLM(L.LightningModule):
             "proposal_weight": pw_nelbo.to(dtype=torch.float32),
         }
 
+    def _log_losses(self, losses, stage: str, **log_kwargs):
+        # "loss" is the training objective (loss_geometry, importance-weighted),
+        # "nelbo" the poincare-polar ELBO estimate (nelbo_geometry, likewise
+        # weighted) and "ce" the plain denoising cross-entropy.
+        loss = losses["loss"].mean()
+        self.log(f"{stage}_loss", loss, **log_kwargs)
+        self.log(f"{stage}_loss_std", losses["loss"].std(), **log_kwargs)
+        self.log(f"{stage}_nelbo", losses["wnelbo_loss"].mean(), **log_kwargs)
+        self.log(f"{stage}_ce", losses["ce"].mean(), **log_kwargs)
+        return loss
+
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         losses = self._compute_losses(batch)
-        loss = losses["loss"].mean()
-        loss_std = losses["loss"].std()
-
+        loss = self._log_losses(losses, "train", on_step=True, on_epoch=False, prog_bar=True)
+        self.recorder.add("train_loss", step=int(self.global_step) + 1, val=loss)
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int):
-        losses = self._compute_losses(batch)
-        loss = losses["loss"].mean()
-        loss_values = losses["loss"].detach().to(dtype=torch.float64)
+        return self._log_losses(
+            self._compute_losses(batch), "val", on_step=False, on_epoch=True, prog_bar=True
+        )
 
-        return loss
+    def on_validation_epoch_end(self):
+        if not self.trainer.sanity_checking:
+            self.recorder.add(
+                "val_loss", step=int(self.global_step), val=self.trainer.callback_metrics["val_loss"]
+            )
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
-        losses = self._compute_losses(batch)
-        loss = losses["loss"].mean()
-        loss_values = losses["loss"].detach().to(dtype=torch.float64)
+        return self._log_losses(
+            self._compute_losses(batch), "test", on_step=False, on_epoch=True, prog_bar=True
+        )
 
-        return loss
+    def on_test_epoch_end(self):
+        self.recorder.add(
+            "test_loss",
+            step=max(self.recorder.last_step("train_loss"), int(self.global_step)) + 1,
+            val=self.trainer.callback_metrics["test_loss"],
+        )
 
-@hydra.main(version_base=None)
+@hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     datamodule = UnigramDataModule(config=cfg)
     cfg.ps = datamodule.ps
@@ -180,6 +241,7 @@ def main(cfg: DictConfig) -> None:
         accelerator="auto",
         devices=1,
         max_steps=int(cfg.max_steps),
+        gradient_clip_val=cfg.gradient_clip_val,
         logger=False,
         enable_checkpointing=False,
         enable_model_summary=False,

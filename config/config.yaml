@@ -1,0 +1,46 @@
+# Unigram bridge training. Two objectives are wired up:
+#   loss_geometry=cross_entropy    -> Loss.binary_bridge_loss_crossentropy   (training loss)
+#   nelbo_geometry=poincare_polar  -> binary_bridge_loss_poincare_disk_polar (reported ELBO)
+# Set loss_geometry=poincare_polar to train directly on the ELBO instead.
+mode: tnb  # tnb = train the MLP, opt = Bayes-optimal reference model (no training)
+ps: naive_ps
+vocab_size: 10
+train_size: 20000
+val_size: 4000
+test_size: 4000000
+batch_size: 2048
+num_workers: 0
+seed: 42
+
+hyper_dim: 2
+hidden_size: 128
+depth: 3
+trainable_word_embedding: true
+flow_path: hyperbolic_boundary
+hyper_dt: 0.01
+hyper_T: 10000000
+
+loss_geometry: cross_entropy
+loss_proposal_type: exp
+loss_proposal_exp_rate: 0.1
+nelbo_geometry: poincare_polar
+nelbo_proposal_type: exp
+nelbo_proposal_exp_rate: 0.1
+
+lr: 0.001
+max_steps: 20000
+# The importance weights 1/q(t) are heavy-tailed, so single batches can produce
+# enormous gradients; without clipping the poincare-polar run diverges to NaN.
+gradient_clip_val: 1.0
+
+run_name: unigram_m-${mode}_lg-${loss_geometry}_ng-${nelbo_geometry}_twe-${trainable_word_embedding}_q-${loss_proposal_type}${loss_proposal_exp_rate}_lr${lr}_st${max_steps}_s${seed}
+folder: output/${run_name}
+loss_data_path: loss_history.json
+loss_plot_path: loss_curves.jpg
+loss_plot_ma_window: null
+
+hydra:
+  run:
+    dir: ${folder}
+  job:
+    chdir: false
