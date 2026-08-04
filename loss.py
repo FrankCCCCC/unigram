@@ -74,7 +74,16 @@ class HyperBridge:
             dtype=thetas.dtype,
             word_embedding=word_embedding,
         )
-        return thetas + phis[targets]
+        # Wrap into [0, 2*pi). The spike lies in (-pi, pi) and phi_v is an
+        # arbitrary angle, so the raw sum ranges over (-2*pi, 2*pi) and its
+        # UNWRAPPED value reveals which phi_v was added: a word whose
+        # theta - phi_v falls outside (-pi, pi) cannot have produced this
+        # sample. The loss is pure trigonometry and only ever sees theta mod
+        # 2*pi, so it hands those impossible words their 2*pi-image
+        # probability. Leaving theta unwrapped therefore feeds the model a
+        # side channel the loss does not price in, and the ELBO stops being a
+        # bound -- a trained model drops below H(p).
+        return torch.remainder(thetas + phis[targets], 2 * torch.pi)
 
     @staticmethod
     def binary_bridge(
@@ -214,20 +223,6 @@ class Loss:
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
-            )
-        else:
-            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
-        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
-
-    @staticmethod
-    def weighted_binary_nelbo(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
-        if loss_geometry == LossGeometry.POINCARE_POLAR:
-            bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
-                logits=logits,
-                targets=targets,
-                rhos=rhos,
-                thetas=thetas,
-                word_embedding=word_embedding,
             )
         else:
             raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")

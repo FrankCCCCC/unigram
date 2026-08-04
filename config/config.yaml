@@ -23,9 +23,8 @@ hyper_T: 10000000
 loss_geometry: cross_entropy
 loss_proposal_type: exp
 loss_proposal_exp_rate: 0.1
-nelbo_geometry: poincare_polar
-nelbo_proposal_type: exp
-nelbo_proposal_exp_rate: 0.1
+ref_proposal_type: exp
+ref_proposal_exp_rate: 0.1
 
 lr: 0.001
 max_steps: 20000
@@ -33,7 +32,7 @@ max_steps: 20000
 # enormous gradients; without clipping the poincare-polar run diverges to NaN.
 gradient_clip_val: 1.0
 
-run_name: unigram_m-${mode}_lg-${loss_geometry}_ng-${nelbo_geometry}_twe-${trainable_word_embedding}_q-${loss_proposal_type}${loss_proposal_exp_rate}_lr${lr}_st${max_steps}_s${seed}
+run_name: unigram_m-${mode}_lg-${loss_geometry}_twe-${trainable_word_embedding}_q-${loss_proposal_type}${loss_proposal_exp_rate}_lr${lr}_st${max_steps}_s${seed}
 folder: output/${run_name}
 loss_data_path: loss_history.json
 loss_plot_path: loss_curves.jpg

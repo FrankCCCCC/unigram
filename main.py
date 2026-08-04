@@ -18,7 +18,6 @@ class HyperbolicDLM(L.LightningModule):
         self.bridge = HyperBridge()
         self.recorder = Recorder()
 
-        self.loss_geometry = config.loss_geometry
         self.model_input_dim = config.hyper_dim
         # If False the per-word boundary angles phi_v stay fixed at (v+0.5)*2*pi/V
         # instead of being read off the lm-head; the lm-head still trains as the
@@ -108,9 +107,6 @@ class HyperbolicDLM(L.LightningModule):
         else:
             raise ValueError(f"config.flow_path = {self.config.flow_path} is not supported, only suppport ({FlowPath.HYPERBOLIC_BOUNDARY}).")
 
-        # if "lorentz" in self.loss_geometry:
-        #     z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
-        # else:
         z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
         return logits, ts, rhos, thetas, proposal_weight
@@ -119,6 +115,7 @@ class HyperbolicDLM(L.LightningModule):
         targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
         batch_size = targets.shape[0]
 
+        # Loss Function
         loss_gen = self._make_step_generator(salt=0)
         loss_logits, ts_loss, rhos_loss, thetas_loss, pw_loss = self.get_logits_inputs(
             batch_size=batch_size,
@@ -138,63 +135,70 @@ class HyperbolicDLM(L.LightningModule):
             rhos=rhos_loss,
             thetas=thetas_loss,
             proposal_weight=pw_loss,
-            loss_geometry=self.loss_geometry,
+            loss_geometry=self.config.loss_geometry,
             word_embedding=self.word_embedding,
         )
-        ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
+        # ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
 
-        if (self.config.nelbo_proposal_type == self.config.loss_proposal_type
-              and self.config.nelbo_proposal_exp_rate == self.config.loss_proposal_exp_rate
-              and self.config.nelbo_geometry == self.loss_geometry
-              and self.config.loss_geometry not in {LossGeometry.CROSS_ENTROPY, LossGeometry.HORO_CROSS_ENTROPY}):
-            # Identical configs — reuse the loss-path computation.
-            wnelbo = wloss
-            nelbo = loss
-            ts_nelbo = ts_loss
-            pw_nelbo = pw_loss
-        else:
-            nelbo_gen = self._make_step_generator(salt=1)
-            nelbo_logits, ts_nelbo, rhos_nelbo, thetas_nelbo, pw_nelbo = self.get_logits_inputs(
-                batch_size=batch_size,
-                targets=targets,
-                hyper_dt=self.config.hyper_dt,
-                hyper_T=self.config.hyper_T,
-                proposal_type=self.config.nelbo_proposal_type,
-                proposal_exp_rate=self.config.nelbo_proposal_exp_rate,
-                vocab_size=self.config.vocab_size,
-                word_embedding=self.word_embedding,
-                device=self.device,
-                generator=nelbo_gen,
-            )
-            wnelbo, nelbo = Loss.weighted_binary_nelbo(
-                logits=nelbo_logits,
-                targets=targets,
-                rhos=rhos_nelbo,
-                thetas=thetas_nelbo,
-                proposal_weight=pw_nelbo,
-                loss_geometry=self.config.nelbo_geometry,
-                word_embedding=self.word_embedding,
-            )
+        # Reference CE and ELBO
+        ref_gen = self._make_step_generator(salt=1)
+        logits_ref, ts_ref, rhos_ref, thetas_ref, pw_ref = self.get_logits_inputs(
+            batch_size=batch_size,
+            targets=targets,
+            hyper_dt=self.config.hyper_dt,
+            hyper_T=self.config.hyper_T,
+            proposal_type=self.config.ref_proposal_type,
+            proposal_exp_rate=self.config.ref_proposal_exp_rate,
+            vocab_size=self.config.vocab_size,
+            word_embedding=self.word_embedding,
+            device=self.device,
+            generator=ref_gen,
+        )
+        wnelbo_ref, nelbo_ref = Loss.weighted_binary_loss(
+            logits=logits_ref,
+            targets=targets,
+            rhos=rhos_ref,
+            thetas=thetas_ref,
+            proposal_weight=pw_ref,
+            loss_geometry=LossGeometry.POINCARE_POLAR,
+            word_embedding=self.word_embedding,
+        )
+        wce_ref, ce_ref = Loss.weighted_binary_loss(
+            logits=logits_ref,
+            targets=targets,
+            rhos=rhos_ref,
+            thetas=thetas_ref,
+            proposal_weight=pw_ref,
+            loss_geometry=LossGeometry.CROSS_ENTROPY,
+            word_embedding=self.word_embedding,
+        )
 
         return {
-            "loss": wloss,
-            "wnelbo_loss": wnelbo,
-            "nelbo_loss": nelbo,
-            "ce": ce,
-            "ts": ts_nelbo.to(dtype=torch.float32),
-            "proposal_weight": pw_nelbo.to(dtype=torch.float32),
+            "loss": loss,
+            "wloss": wloss,
+            "wnelbo_ref": wnelbo_ref,
+            "nelbo_ref": nelbo_ref,
+            "wce_ref": wce_ref,
+            "ce_ref": ce_ref,
+            "ts": ts_loss.to(dtype=torch.float32),
+            "proposal_weight": pw_loss.to(dtype=torch.float32),
         }
 
     def _log_losses(self, losses, stage: str, **log_kwargs):
-        # "loss" is the training objective (loss_geometry, importance-weighted),
-        # "nelbo" the poincare-polar ELBO estimate (nelbo_geometry, likewise
-        # weighted) and "ce" the plain denoising cross-entropy.
-        loss = losses["loss"].mean()
-        self.log(f"{stage}_loss", loss, **log_kwargs)
-        self.log(f"{stage}_loss_std", losses["loss"].std(), **log_kwargs)
-        self.log(f"{stage}_nelbo", losses["wnelbo_loss"].mean(), **log_kwargs)
-        self.log(f"{stage}_ce", losses["ce"].mean(), **log_kwargs)
-        return loss
+        # "loss" is the training objective (loss_geometry, importance-weighted).
+        # "wnelbo" is the poincare-polar ELBO estimate: the importance-weighted
+        # integrand, so its mean estimates the whole integral over t. "nelbo" is
+        # the same integrand unweighted (not an ELBO on its own -- it is what the
+        # per-t loss looks like under the proposal). "ce" is the plain denoising
+        # cross-entropy.
+        wloss = losses["wloss"].mean()
+        self.log(f"{stage}_wloss", wloss, **log_kwargs)
+        self.log(f"{stage}_wloss_std", losses["wloss"].std(), **log_kwargs)
+        self.log(f"{stage}_wnelbo_ref", losses["wnelbo_ref"].mean(), **log_kwargs)
+        self.log(f"{stage}_nelbo_ref", losses["nelbo_ref"].mean(), **log_kwargs)
+        self.log(f"{stage}_wce_ref", losses["wce_ref"].mean(), **log_kwargs)
+        self.log(f"{stage}_ce_ref", losses["ce_ref"].mean(), **log_kwargs)
+        return wloss
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         losses = self._compute_losses(batch)
@@ -210,7 +214,7 @@ class HyperbolicDLM(L.LightningModule):
     def on_validation_epoch_end(self):
         if not self.trainer.sanity_checking:
             self.recorder.add(
-                "val_loss", step=int(self.global_step), val=self.trainer.callback_metrics["val_loss"]
+                "val_loss", step=int(self.global_step), val=self.trainer.callback_metrics["val_wloss"]
             )
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
@@ -221,8 +225,8 @@ class HyperbolicDLM(L.LightningModule):
     def on_test_epoch_end(self):
         self.recorder.add(
             "test_loss",
-            step=max(self.recorder.last_step("train_loss"), int(self.global_step)) + 1,
-            val=self.trainer.callback_metrics["test_loss"],
+            step= int(self.global_step) + 1,
+            val=self.trainer.callback_metrics["test_wloss"],
         )
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
