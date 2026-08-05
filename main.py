@@ -202,12 +202,52 @@ class HyperbolicDLM(L.LightningModule):
         # cross-entropy.
         wloss = losses["wloss"].mean()
         self.log(f"{stage}_wloss", wloss, **log_kwargs)
-        self.log(f"{stage}_wloss_std", losses["wloss"].std(), **log_kwargs)
         self.log(f"{stage}_wnelbo_ref", losses["wnelbo_ref"].mean(), **log_kwargs)
         self.log(f"{stage}_nelbo_ref", losses["nelbo_ref"].mean(), **log_kwargs)
         self.log(f"{stage}_wce_ref", losses["wce_ref"].mean(), **log_kwargs)
         self.log(f"{stage}_ce_ref", losses["ce_ref"].mean(), **log_kwargs)
+        if log_kwargs.get("on_epoch"):
+            # Epoch-aggregated std must come from pooled sums, not from
+            # self.log(...).std(): Lightning would average the PER-BATCH stds,
+            # and one 2048-sample batch rarely contains the tail of these
+            # heavy-tailed integrands, so that underestimates by ~7%.
+            self._accumulate_std(losses)
+        else:
+            for key in self.STD_KEYS:
+                self.log(f"{stage}_{key}_std", losses[key].std(), **log_kwargs)
         return wloss
+
+    # Quantities that also get a standard deviation reported.
+    STD_KEYS = ("wloss", "wnelbo_ref", "wce_ref")
+
+    def _reset_std_accum(self) -> None:
+        # per key: [sum, sum of squares, count]
+        self._std_accum = {key: [0.0, 0.0, 0] for key in self.STD_KEYS}
+
+    def _accumulate_std(self, losses) -> None:
+        for key in self.STD_KEYS:
+            values = losses[key].detach().to(dtype=torch.float64)
+            acc = self._std_accum[key]
+            acc[0] += float(values.sum().cpu())
+            acc[1] += float(values.square().sum().cpu())
+            acc[2] += int(values.numel())
+
+    @staticmethod
+    def _std_from_sums(total: float, sq_total: float, count: int) -> float:
+        if count <= 1:
+            return 0.0
+        return (max(sq_total - total * total / count, 0.0) / (count - 1)) ** 0.5
+
+    def _log_std_accum(self, stage: str) -> None:
+        for key, (total, sq_total, count) in self._std_accum.items():
+            self.log(
+                f"{stage}_{key}_std",
+                torch.tensor(
+                    self._std_from_sums(total, sq_total, count),
+                    device=self.device,
+                    dtype=torch.float64,
+                ),
+            )
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         losses = self._compute_losses(batch, batch_idx=batch_idx, stage=0)
@@ -220,8 +260,12 @@ class HyperbolicDLM(L.LightningModule):
             self._compute_losses(batch, batch_idx=batch_idx, stage=1), "val", on_step=False, on_epoch=True, prog_bar=True
         )
 
+    def on_validation_epoch_start(self):
+        self._reset_std_accum()
+
     def on_validation_epoch_end(self):
         if not self.trainer.sanity_checking:
+            self._log_std_accum("val")
             self.recorder.add(
                 "val_loss", step=int(self.global_step), val=self.trainer.callback_metrics["val_wloss"]
             )
@@ -231,7 +275,11 @@ class HyperbolicDLM(L.LightningModule):
             self._compute_losses(batch, batch_idx=batch_idx, stage=2), "test", on_step=False, on_epoch=True, prog_bar=True
         )
 
+    def on_test_epoch_start(self):
+        self._reset_std_accum()
+
     def on_test_epoch_end(self):
+        self._log_std_accum("test")
         self.recorder.add(
             "test_loss",
             step= int(self.global_step) + 1,
