@@ -1,8 +1,11 @@
-# CLAUDE.md
+# Agent.md
+
+Guidance for coding agents working in this repository.
 
 ## Coding Rules
 
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific
+instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
@@ -60,22 +63,146 @@ For multi-step tasks, state a brief plan:
 3. [Step] → verify: [check]
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+Strong success criteria let you loop independently. Weak criteria ("make it work") require
+constant clarification.
+
+This repo has no test suite. The de-facto verification is a short training run whose
+`test_wnelbo_ref` lands at or above `H(p)` (see **Invariants** below) — use it as the
+regression check for any change to the bridge, loss, or proposal.
 
 ### 5. Minimalism Implementation
 
 Make sure the codebase is easy-understanding, canonical, and concise.
 
-### 6. RUN MODELS ON COMPUTE NODE
+### 6. RUN MODELS ON COMPUTE NODES
 
-If you're on SLURM and the script need to load / compute with model, do it on compute node. DO NOT RUN ANY MODEL ON LOGIN NODE.
+If you're on SLURM and the script needs to load / compute with a model, do it on a compute
+node. DO NOT RUN ANY MODEL ON A LOGIN NODE. The runs here are small (a 3-layer MLP, V=10),
+but this rule has no exception.
 
-### 7. NO GIT OPERATIOn WITHOUT USERS' APPROVAL
+### 7. NO GIT OPERATIONS WITHOUT THE USER'S APPROVAL
 
 ---
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to
+overcomplication, and clarifying questions come before implementation rather than after
+mistakes.
 
+---
+
+## What This Repo Is
+
+A minimal, single-file-per-concern testbed for a **hyperbolic-boundary bridge language model**
+on a **unigram (sequence length 1)** toy distribution. Everything is small on purpose: the
+point is to check that the bridge, the loss geometries, and the importance-weighted time
+proposal are *numerically correct*, by comparing a trained MLP against a closed-form
+Bayes-optimal model and against the analytic entropy `H(p)`.
+
+The generative process: a target word `y` is mapped to a boundary angle `phi_y` on the
+Poincaré disk; `HyperBridge.binary_bridge` samples a bridge state `z_t = (rho, theta)` at a
+random time `t`; the model must recover `y` from `z_t`. Because `t` runs over an unbounded
+range, it is drawn from a proposal `q(t)` and every per-sample loss is reweighted by `1/q(t)`.
+
+## Repository Layout
+
+```
+main.py           HyperbolicDLM (LightningModule) + hydra entry point. Owns the
+                  train/val/test steps, the per-step RNG seeding, and the "loss vs
+                  reference metrics" split.
+loss.py           HyperBridge (bridge sampler + horosphere geometry + poincare-polar
+                  loss), Loss (cross-entropy loss + importance weighting), Proposal
+                  (t samplers and their 1/q weights). LossGeometry / FlowPath are
+                  string-tag dataclasses.
+model.py          SmallMLP, MLPLM (the trained backbone; its lm_head IS the word
+                  embedding), OptimalModel (closed-form Bayes-optimal logits = log p),
+                  plus disk/vocab geometry helpers.
+dataset.py        UnigramDataset / UnigramDataModule. Resolves the `ps` spec into an
+                  exact-count token dataset and pins vocab_size to len(ps).
+utils.py          TaskMgr (finished.json idempotency marker), save_results.
+visualizer.py     Recorder (in-memory metric series), loss-curve and embedding-
+                  concentration plots, DataMgr (writes both to the run folder).
+geo_bridge.py     Standalone H^2 heat-kernel / geodesic library. NOT imported by
+                  anything yet — a staging area for the general-d bridge. Math is
+                  documented in old/hyper_dm.md.
+config/config.yaml  The only live config. config/data/unigram0109.yaml is empty and
+                  unreferenced (config.yaml has no `defaults:` list).
+experiments/      One folder per experiment project (see below). Untracked.
+output/           Default hydra run dir; holds stale runs from before the metrics were
+                  renamed (test_loss/test_nelbo/test_ce). Gitignored.
+old/              Prior single-file iterations and the math notes (hyper_dm.md,
+                  hyper_dlm.md). Gitignored; read-only reference, do not extend.
+```
+
+Dead-but-present code (do not delete unless asked, do not assume it is wired):
+`model.MLPNLM`, `model.get_model`, `model.poisson_posterior_new`,
+`HyperBridge.binary_bridge_loss_poincare_disk_polar_horocycle`,
+`visualizer.plot_embedding_concentration` (nothing records `emb_*` series), and the
+`LossGeometry` tags other than `poincare_polar` / `cross_entropy`.
+
+### Key config knobs (`config/config.yaml`)
+
+| key | values | note |
+|---|---|---|
+| `mode` | `tnb`, `opt` | `tnb` trains `MLPLM`; `opt` skips `trainer.fit` and only tests `OptimalModel` (the analytic reference) |
+| `ps` | `naive_ps`, `cmplx_ps`, `cmplx_ps1`, `c1e3_exp1.0`, `c1e4_exp1.0`, `c1e5_exp1.0`, or an explicit list | sets the unigram distribution; `vocab_size` is **overwritten** from `len(ps)` in `main`, so setting it by hand does nothing |
+| `loss_geometry` | `cross_entropy`, `poincare_polar` | the trained objective. Other `LossGeometry` tags raise |
+| `flow_path` | `hyperbolic_boundary` | only value accepted |
+| `loss_proposal_type` / `ref_proposal_type` | `exp`, `unif`, `truncated_exp`, `stratified_exp` | `exp` is the shipped default |
+| `loss_proposal_exp_rate` / `ref_proposal_exp_rate` | float > 0 | `0.1` is the shipped default |
+| `hyper_dt`, `hyper_T` | `0.01`, `1e7` | together bound `t` to `[0.01, 1e5]` |
+| `trainable_word_embedding` | bool | `false` pins `phi_v` to the fixed equally spaced angles; the lm_head still trains as the logit readout |
+| `unif_word_embedding` | bool | spread the lm_head rows evenly at init instead of kaiming-uniform |
+| `gradient_clip_val` | `1.0` | required: the `1/q(t)` weights are heavy-tailed and `poincare_polar` diverges to NaN without it |
+| `train_size` / `val_size` / `test_size` | ints | `test_size=4e6` is the shipped value — the estimator's standard error is what makes the `>= H(p)` check meaningful |
+
+`run_name` and `folder` are interpolated templates; `folder` doubles as `hydra.run.dir`.
+Sweeps override `folder` directly.
+
+### Metrics
+
+`_log_losses` writes six scalars per stage (`train_`/`val_`/`test_` prefix):
+
+- `wloss` / `wloss_std` — the **trained** objective (`loss_geometry`, importance-weighted).
+  `wloss.mean()` is what `training_step` returns and what the `Recorder` stores as
+  `train_loss` / `val_loss` / `test_loss`.
+- `wnelbo_ref` — the poincaré-polar ELBO estimate on the *reference* proposal path.
+  **This is the headline number**: importance-weighted, so its mean estimates the whole
+  integral over `t`.
+- `nelbo_ref` — the same integrand **unweighted**. Not an ELBO on its own; it is what the
+  per-`t` loss looks like under the proposal. Don't quote it as a bound.
+- `wce_ref` / `ce_ref` — the denoising cross-entropy, weighted / unweighted.
+
+The loss path and the reference path use **independent RNG streams** (`salt=0` vs `salt=1`
+in `_make_step_generator`), so the reference metrics are comparable across runs trained on
+different objectives.
+
+## Invariants
+
+Break any of these and the numbers silently stop meaning what they claim:
+
+1. **Logits are a residual, not a distribution.** The model's posterior is
+   `softmax(horosphere_dists + logits)`. Scoring plain `cross_entropy(logits, targets)`
+   trains the logits to *be* the posterior, which the poincaré-polar readout then
+   double-counts — measured: the reported ELBO inflates 0.4997 → 0.8714 (1.74×) for the
+   exact Bayes solution, and the weighted CE becomes a divergent integral.
+2. **`test_wnelbo_ref >= H(p)`.** `H(naive_ps) = 0.5003`, `H(cmplx_ps) = 1.6664`,
+   `H(cmplx_ps1) = 2.2985` nats. A trained model dipping *below* `H(p)` means a side channel
+   leaked — historically, leaving `theta` unwrapped in `rotate_with_target` (it must be
+   `remainder(..., 2*pi)`, since the loss only ever sees `theta mod 2*pi`).
+3. **Bridge quantities stay float64.** `ts`, `rhos`, `thetas` and the whole horosphere
+   computation are float64; only the model input `z` and the logits are cast to float32.
+   The polar losses assert this.
+4. **`rho` is capped at `RHO_MAX = 350`.** `cosh` overflows past `ss ~ 710` and both terms of
+   the horosphere log underflow past `rho ~ 372`. The cap is statistically a no-op — by then
+   the bridge angle already identifies the target to full float64 precision.
+5. **Half-angle forms are load-bearing.** `sin_half_sq` / `cos_half_sq` and the
+   `atan2(sin a, cos_half_sq·e^-rho − sin_half_sq·e^+rho)` form exist because the direct
+   expressions cancel catastrophically at large `rho` and produce `0 * inf = NaN` in the
+   backward pass. Don't "simplify" them back.
+6. **Eval RNG must depend on `batch_idx` and `stage`.** Lightning does not advance
+   `global_step` during validate/test; seeding on `global_step` alone gave 1953/1953
+   byte-identical test batches, putting a floor on the standard error that no `test_size`
+   could lower.
 
 ---
 
@@ -212,36 +339,6 @@ Under ``scripts/train/{dataset_name}``,
 one bash file per method ``{method}.sh`` — **one training run per script** (no sweeps or
 loops inside; the sweep parameterizes it via env vars).
 
-- Runs ``python -u -m main mode=train`` with hydra overrides, driven by env-var knobs
-  (with defaults) so a sweep can set them without editing the script.
-- Standard knobs: ``OUTPUT_DIR`` (= ``hydra.run.dir``; holds ``checkpoints/`` + logs),
-  ``RUN_NAME``, ``WANDB_GROUP``, ``DEVICES``, ``NUM_NODES``, ``PER_GPU_BS``
-  (= ``loader.batch_size``), ``GLOBAL_BATCH`` (= ``loader.global_batch_size``),
-  ``MAX_STEPS``, ``CKPT_EVERY``, ``MODEL`` (model config), ``SEQ_LEN`` (= ``model.length``).
-- Method knobs as needed: ``INIT``/``INIT_STD``, ``PRIOR_COV``/``RHO_MAX`` (H-FLM), ``LR``,
-  ``ALPHA_MAX`` (truncation), ``SELF_COND`` (LangFlow), …
-- Checkpoints → ``${OUTPUT_DIR}/checkpoints`` with ``save_top_k=1`` + ``save_last=True``.
-
-Refer to ``scripts/train/sudoku/hflm.sh`` (and ``scripts/train/tinystories/*.sh``).
-
-### Sampling Script
-
-Under ``scripts/sample/{dataset_name}``
-
-one bash file per method ``{method}.sh`` — **one eval run per script**, against a trained
-checkpoint. Two passes:
-
-- ``mode=ppl_eval`` → ``ppl.json`` (val/nll, val/ppl, val/bpd — the denoising-CE flow bound).
-- ``mode=sample_eval`` → ``samples_genppl.json`` (GenPPL = gpt2-large retokenized generative
-  perplexity, sample entropy, generated text).
-- Loads the checkpoint via ``eval.checkpoint_path=${CKPT_PATH}`` (``eval.strict_loading=false``).
-- Knobs: ``CKPT_PATH``, ``OUTPUT_DIR``, ``MODEL``, ``SEQ_LEN``, ``EVAL_BS``, sampler
-  ``STEPS``/``VELOCITY``/``TOPK_VELOCITY``. ``MODEL`` and ``SEQ_LEN`` MUST match the training
-  run so the architecture matches the checkpoint.
-- Always single-GPU: ``DEVICES=1`` + ``CUDA_VISIBLE_DEVICES=0`` (see SLURM Env Setup).
-
-Refer to ``scripts/sample/sudoku/hflm.sh`` (and ``scripts/sample/tinystories/*.sh``).
-
 ### Sweep Script
 
 1. Under ``experiments/{project_name}``
@@ -249,9 +346,22 @@ Refer to ``scripts/sample/sudoku/hflm.sh`` (and ``scripts/sample/tinystories/*.s
 3. Use python and ``simple_slurm`` to submit jobs to slurm
 4. Don't assign ``nice`` in the sweep script. The sweep script only submit the jobs
 
+One folder per project under `experiments/{project_name}/`, containing:
+
+- `sweep.sh` (or `sweep.py`) — **orchestration only**. It loops over the grid and calls
+  `python -u main.py <overrides> folder=experiments/{project}/{run_name}`; it never inlines
+  model code. Knobs come in as env vars with defaults (see `experiments/init_test/sweep.sh`
+  as the reference), plus an `EXTRA` passthrough for ad-hoc hydra overrides.
+- `EXPERIMENT.md` — hypothesis, design, GPU allocation, expected wall-clock.
+- `RESULTS.md` — numerical table + insights and conclusions.
+- `{run_name}/` — one folder per run, written by hydra.
+
+`{run_name}` is semantic and encodes only the *searched* variables, abbreviated:
+`{var1abbr}-{val1}_{var2abbr}-{val2}_...` (e.g. `lg-cross_entropy_q-exp0.1_lr0.001_st20000_s42`).
+
 **Orchestration only** — the sweep CALLS the train + sample scripts; it never inlines
 ``python -m main``. It builds the parameter grid, submits one SLURM job per cell (train
-then eval), and is idempotent/resumable: skip a cell whose ``eval/ppl.json`` exists or
+then eval), and is idempotent/resumable: skip a cell whose ``finished.json`` exists or
 whose job name is already in ``squeue``.
 
 Unique and semanticful name for each slurm job, ex ``{project_name}_{var1}-{var1_value}_{var2}-{var2_value}...``, use abbr for each variable nam ``var1``, followed by a parameter value ``var1_value``. Only record the searched parameters in the project
@@ -291,23 +401,28 @@ CKPT_PATH=<out>/checkpoints/last.ckpt OUTPUT_DIR=<out>/eval DEVICES=1 \
 All checkpoints and generated text go under ``outputs/{project_name}`` (same name as the
 experiment folder under ``experiments/``), one subfolder per run:
 
+Each run folder holds:
+
 ```
-outputs/{project_name}/{run_name}/          # = hydra.run.dir of the training run
-├── checkpoints/
-│   ├── last.ckpt                            # resume + eval load this (save_last=True)
-│   └── ...                                  # periodic step checkpoint(s), capped by save_top_k=1
-├── .hydra/ , *.log , wandb/                 # training config + logs
-└── eval/
-    ├── ppl.json                             # numerical results: val/nll, val/ppl, val/bpd
-    ├── samples_genppl.json                  # GenPPL (gen_ppl_first_chunk_retok), entropy, avg_nfe, text
-    ├── ppl/                                 # hydra run dir for the ppl_eval pass (config/logs)
-    └── sample/                              # hydra run dir for the sample_eval pass (config/logs)
+experiments/{project}/{run_name}/
+├── .hydra/{config,hydra,overrides}.yaml   # exact resolved config
+├── main.log                               # hydra job log
+├── loss_history.json                      # Recorder series: train_loss/val_loss/test_loss
+├── loss_curves.jpg                        # plot of the above
+├── test_metrics.json                      # the six test_* scalars
+└── finished.json                          # TaskMgr marker
 ```
 
+**Idempotency:** `TaskMgr.check_finished()` reads `finished.json` and returns immediately if
+the run already completed, so re-running a sweep is safe and only fills gaps. To force a redo,
+delete `finished.json` (or the whole run folder).
+
+Sweeps that submit to SLURM should use `simple_slurm`, one job per grid cell, with a unique
+job name matching `{run_name}`, and should skip a cell whose `finished.json` exists or whose
+job name is already in `squeue`. Don't set `nice` inside a sweep script — the sweep only
+submits.
+
 - ``{run_name}`` = the semantic SLURM job name (e.g. ``{var}-{val}_...``).
-- ``ppl.json`` holds the ``trainer.validate()`` metrics (the denoising-CE flow bound — not a
-  true AR PPL). ``samples_genppl.json`` is the generation-quality deliverable; read GenPPL
-  **with** entropy (low GenPPL + low entropy ⇒ degenerate/repetitive collapse, not quality).
 - ``experiments/report.py {project_name}`` scans every ``{run_name}/eval/`` and writes a
   summary table to ``experiments/{project_name}/RESULTS.md``.
 
