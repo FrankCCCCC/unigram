@@ -100,12 +100,14 @@ class UnigramDataModule(L.LightningDataModule):
                 ret_ps = [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
             elif ps == "cmplx_ps1":
                 ret_ps = [0.11,0.10,0.10,0.11,0.11,0.10,0.10,0.10,0.09,0.08]
-            elif ps == "c1e3_exp1.0":
+            elif ps == "c1e2_exp1.0":
                 ret_ps = self._exp_decay_ps(n=100, lam=1.0)
-            elif ps == "c1e4_exp1.0":
+            elif ps == "c1e3_exp1.0":
                 ret_ps = self._exp_decay_ps(n=1000, lam=1.0)
-            elif ps == "c1e5_exp1.0":
+            elif ps == "c1e4_exp1.0":
                 ret_ps = self._exp_decay_ps(n=10000, lam=1.0)
+            elif ps == "c1e5_exp1.0":
+                ret_ps = self._exp_decay_ps(n=100000, lam=1.0)
             else:
                 raise ValueError(
                     f"config.ps={ps!r} is not a supported string spec; "

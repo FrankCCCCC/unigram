@@ -43,7 +43,15 @@ class SmallMLP(nn.Module):
         return self.net(torch.cat([z, t], dim=-1))
 
 class MLPLM(nn.Module):
-    def __init__(self, vocab_size: int, input_dim: int, output_dim: int, hidden_size: int, depth: int):
+    def __init__(
+        self,
+        vocab_size: int,
+        input_dim: int,
+        output_dim: int,
+        hidden_size: int,
+        depth: int,
+        unif_word_embedding: bool = False,
+    ):
         super().__init__()
         self.mlp = SmallMLP(
             input_dim=input_dim + 1,
@@ -53,6 +61,16 @@ class MLPLM(nn.Module):
         )
 
         self.lm_head = nn.Linear(output_dim, vocab_size, bias=False)
+        if unif_word_embedding:
+            # lm_head.weight IS the word embedding the bridge and loss read: each
+            # row's direction is that word's boundary angle phi_v = atan2(e_v)
+            # (see HyperbolicDLM.word_embedding / HyperBridge._vocab_angles).
+            # nn.Linear's default kaiming-uniform init leaves those angles badly
+            # clustered, so spread them evenly instead.
+            with torch.no_grad():
+                self.lm_head.weight.copy_(
+                    uniform_sphere_points(vocab_size, output_dim).to(self.lm_head.weight.dtype)
+                )
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """

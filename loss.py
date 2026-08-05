@@ -27,6 +27,9 @@ class HyperBridge:
     PROPOSAL_TRUNCATED_EXP_NAME: str = "truncated_exp"
     PROPOSAL_UNIF_NAME: str = "unif"
     PROPOSAL_SIMPSON_NAME: str = "simpson"
+    # Largest radial coordinate the bridge emits. Past ~372 both terms of the
+    # horosphere log underflow, and cosh overflows outright past ss ~ 710.
+    RHO_MAX: float = 350.0
 
     @staticmethod
     def sample_chi(ns, dtype=torch.float64):
@@ -92,11 +95,17 @@ class HyperBridge:
         vocab_size: int,
         word_embedding: Optional[torch.FloatTensor] = None,
     ):
-        # Radial sampling
+        # Radial sampling. cosh overflows to +inf for ss > 710, which would make
+        # rho = +inf and NaN the whole batch -- reachable with proposal_type=unif
+        # at the shipped hyper_T (t up to 1e5 gives ~99% non-finite rho). Capping
+        # rho is statistically a no-op: by RHO_MAX the bridge angle already
+        # identifies the target to full float64 precision (exp(-2*rho) underflows
+        # past ~372), so every larger rho is indistinguishable from RHO_MAX.
         ns = torch.poisson(ts/8).to(torch.int64)
         ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
-        ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
+        ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss.clamp_max(700.0)))
+        ps = ps.clamp_max(HyperBridge.RHO_MAX)
 
         # Free angles
         us = torch.rand_like(ts)
@@ -112,31 +121,21 @@ class HyperBridge:
         return ps, thetas
 
     @staticmethod
-    def binary_bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas, word_embedding=None):
-        (N,) = targets.shape
-        (N,V) = logits.shape
-        device = rhos.device
-        assert(rhos.shape == (N,))
-        assert(thetas.shape == (N,))
-        assert(targets.dtype == torch.int64)
-        assert(rhos.dtype == torch.float64)
-        assert(thetas.dtype == torch.float64)
-        assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
-        # phi_v for every vocab word: learnable embedding angles when given,
-        # otherwise the equally spaced points used by the *_old variant.
+    def horosphere_geometry(rhos, thetas, vocab_size, word_embedding=None):
+        """Shared geometry: (alphas, sin_half_sq, cos_half_sq, horosphere_dists).
+
+        `horosphere_dists[n, v]` is the log density of the bridge angle at word
+        v, up to a v-independent constant, so `softmax(horosphere_dists +
+        log p)` is exactly the Bayes posterior q(y | z_t). Every consumer of the
+        logits must therefore treat them as a RESIDUAL on top of this term.
+        """
         phis = HyperBridge._vocab_angles(
-            vocab_size=V,
-            device=device,
+            vocab_size=vocab_size,
+            device=rhos.device,
             dtype=torch.float64,
             word_embedding=word_embedding,
         )
-        # first, we get the horosphere distances
-        # print(f"thetas ({thetas.mean().item()}): {torch.isfinite(thetas).all().item()}")
-        # print(f"phis ({phis.mean().item()}): {torch.isfinite(phis).all().item()}")
         alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
-        # print(f"alphas: {torch.isfinite(alphas).all().item()}")
-        sin_alphas = alphas.sin()
-        # print(f"sin_alphas ({sin_alphas.mean().item()}): {torch.isfinite(sin_alphas).all().item()}")
         # Everything below is written via the half-angle identities
         # 1 - cos(a) = 2 sin^2(a/2) and 1 + cos(a) = 2 cos^2(a/2). The direct
         # forms cancel catastrophically at large rho, where the bridge angle is
@@ -146,10 +145,36 @@ class HyperBridge:
         sin_half_sq = half_alphas.sin().square()
         cos_half_sq = half_alphas.cos().square()
         # log2 - log((1 - cos a) e^rho + (1 + cos a) e^-rho), with e^rho pulled
-        # out of the log so nothing overflows.
+        # out of the log so nothing overflows. clamp_min keeps the log finite
+        # once BOTH terms underflow (rho > ~372.6, where sin_half_sq is exactly
+        # 0 for the target word); without it horosphere_dists is +inf and the
+        # softmax below returns NaN for the whole row.
         horosphere_dists = -rhos[:,None] - (
             sin_half_sq + cos_half_sq * (-2 * rhos[:,None]).exp()
-        ).log()
+        ).clamp_min(torch.finfo(torch.float64).tiny).log()
+        return alphas, sin_half_sq, cos_half_sq, horosphere_dists
+
+    @staticmethod
+    def binary_bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas, word_embedding=None):
+        (N,) = targets.shape
+        (N,V) = logits.shape
+        assert(rhos.shape == (N,))
+        assert(thetas.shape == (N,))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
+        # betas below needs exp(+rho), which overflows past rho ~ 709 and then
+        # yields 0 * inf = NaN for the target word. binary_bridge already caps
+        # rho, so this only defends against callers passing raw values.
+        rhos = rhos.clamp_max(HyperBridge.RHO_MAX)
+        alphas, sin_half_sq, cos_half_sq, horosphere_dists = HyperBridge.horosphere_geometry(
+            rhos=rhos,
+            thetas=thetas,
+            vocab_size=V,
+            word_embedding=word_embedding,
+        )
+        sin_alphas = alphas.sin()
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
         mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
@@ -203,8 +228,31 @@ class HyperBridge:
 
 class Loss:
     @staticmethod
-    def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
-        return torch.nn.functional.cross_entropy(logits, targets, reduction='none')
+    def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas, word_embedding=None):
+        """Denoising cross-entropy of the model's OWN predictive distribution.
+
+        The model's posterior over words is softmax(horosphere_dists + logits):
+        the logits are a residual on top of the bridge geometry, not the
+        distribution itself. Scoring cross_entropy(logits, targets) instead
+        would train the logits to BE the posterior, which the poincare-polar
+        readout then double-counts by adding horosphere_dists a second time --
+        measured, that inflates the reported ELBO from 0.4997 to 0.8714 (1.74x)
+        for the exact Bayes solution. It also makes the importance-weighted CE
+        a divergent integral, because CE(t) then tends to H(p) > 0 as t -> inf
+        instead of decaying to 0.
+        """
+        V = logits.shape[-1]
+        _, _, _, horosphere_dists = HyperBridge.horosphere_geometry(
+            rhos=rhos,
+            thetas=thetas,
+            vocab_size=V,
+            word_embedding=word_embedding,
+        )
+        return torch.nn.functional.cross_entropy(
+            horosphere_dists + logits.to(torch.float64),
+            targets,
+            reduction='none',
+        )
 
     @staticmethod
     def weighted_binary_loss(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
@@ -223,6 +271,7 @@ class Loss:
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
+                word_embedding=word_embedding,
             )
         else:
             raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")

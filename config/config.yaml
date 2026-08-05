@@ -16,6 +16,9 @@ hyper_dim: 2
 hidden_size: 128
 depth: 3
 trainable_word_embedding: true
+# Spread the lm_head rows (= the boundary angles phi_v) evenly around the circle
+# at init instead of nn.Linear's default kaiming-uniform, which starts them clustered.
+unif_word_embedding: false
 flow_path: hyperbolic_boundary
 hyper_dt: 0.01
 hyper_T: 10000000

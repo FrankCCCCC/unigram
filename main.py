@@ -31,6 +31,7 @@ class HyperbolicDLM(L.LightningModule):
                 output_dim=config.hyper_dim,
                 hidden_size=config.hidden_size,
                 depth=config.depth,
+                unif_word_embedding=config.unif_word_embedding,
             )
         elif self.config.mode == "opt":
             self.model = OptimalModel(
@@ -54,12 +55,20 @@ class HyperbolicDLM(L.LightningModule):
         head = getattr(self.model, "lm_head", None)
         return head.weight if head is not None else None
 
-    def _make_step_generator(self, salt: int) -> torch.Generator:
-        """Per-step, per-path torch.Generator on self.device."""
-        STEP_STRIDE = 1_000_003
+    def _make_step_generator(self, salt: int, batch_idx: int = 0, stage: int = 0) -> torch.Generator:
+        """Per-step, per-batch, per-path torch.Generator on self.device.
+
+        batch_idx and stage must be part of the seed: Lightning does not advance
+        global_step during validate/test, so seeding on global_step alone gives
+        every eval batch the identical t vector (measured: 1953/1953 test batches
+        byte-identical). The estimator stays unbiased but its standard error hits
+        a floor that raising test_size cannot lower -- ~2x wider than it looks.
+        """
         seed_value = (
-            self.config.seed * STEP_STRIDE
-            + int(self.global_step) * 2
+            self.config.seed * 1_000_003
+            + int(self.global_step) * 7_919
+            + int(batch_idx) * 104_729
+            + int(stage) * 15_485_863
             + int(salt)
         ) & 0x7FFF_FFFF_FFFF_FFFF
         return torch.Generator(device=self.device).manual_seed(seed_value)
@@ -111,12 +120,12 @@ class HyperbolicDLM(L.LightningModule):
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
         return logits, ts, rhos, thetas, proposal_weight
 
-    def _compute_losses(self, batch: torch.Tensor):
+    def _compute_losses(self, batch: torch.Tensor, batch_idx: int = 0, stage: int = 0):
         targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
         batch_size = targets.shape[0]
 
         # Loss Function
-        loss_gen = self._make_step_generator(salt=0)
+        loss_gen = self._make_step_generator(salt=0, batch_idx=batch_idx, stage=stage)
         loss_logits, ts_loss, rhos_loss, thetas_loss, pw_loss = self.get_logits_inputs(
             batch_size=batch_size,
             targets=targets,
@@ -141,7 +150,7 @@ class HyperbolicDLM(L.LightningModule):
         # ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
 
         # Reference CE and ELBO
-        ref_gen = self._make_step_generator(salt=1)
+        ref_gen = self._make_step_generator(salt=1, batch_idx=batch_idx, stage=stage)
         logits_ref, ts_ref, rhos_ref, thetas_ref, pw_ref = self.get_logits_inputs(
             batch_size=batch_size,
             targets=targets,
@@ -201,14 +210,14 @@ class HyperbolicDLM(L.LightningModule):
         return wloss
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):
-        losses = self._compute_losses(batch)
+        losses = self._compute_losses(batch, batch_idx=batch_idx, stage=0)
         loss = self._log_losses(losses, "train", on_step=True, on_epoch=False, prog_bar=True)
         self.recorder.add("train_loss", step=int(self.global_step) + 1, val=loss)
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int):
         return self._log_losses(
-            self._compute_losses(batch), "val", on_step=False, on_epoch=True, prog_bar=True
+            self._compute_losses(batch, batch_idx=batch_idx, stage=1), "val", on_step=False, on_epoch=True, prog_bar=True
         )
 
     def on_validation_epoch_end(self):
@@ -219,7 +228,7 @@ class HyperbolicDLM(L.LightningModule):
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
         return self._log_losses(
-            self._compute_losses(batch), "test", on_step=False, on_epoch=True, prog_bar=True
+            self._compute_losses(batch, batch_idx=batch_idx, stage=2), "test", on_step=False, on_epoch=True, prog_bar=True
         )
 
     def on_test_epoch_end(self):
