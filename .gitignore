@@ -1,3 +1,4 @@
 output/
 old/
 __pycache__/
+logs/
