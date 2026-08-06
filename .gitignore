@@ -1,4 +1,8 @@
 output/
+paper/
 old/
 __pycache__/
 logs/
+
+output
+paper
