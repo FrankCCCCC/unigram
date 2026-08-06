@@ -77,6 +77,11 @@ MEM = "16G"
 # Scheduling priority. In SLURM a HIGHER --nice means LOWER priority, so the
 # primary seed goes in at nice=0 and the replicate seeds queue behind it: a full
 # single-seed grid completes first and the replicates fill in afterwards.
+#
+# --nice MUST be passed on the sbatch command line, not as a #SBATCH directive:
+# its argument is OPTIONAL, so simple_slurm's space-separated
+# "#SBATCH --nice   0" parses as --nice followed by a stray token, and sbatch
+# rejects it with "Invalid directive found in batch script: 0".
 PRIMARY_SEED = 0
 NICE_PRIMARY = 0
 NICE_REPLICATE = 50
@@ -160,6 +165,7 @@ def main() -> None:
         args.ps, args.geometries, PROPOSALS, args.rates, args.steps, args.seeds))
     submitted = skipped_done = skipped_queued = 0
     first_body = None
+    failed: list[tuple[str, str]] = []
     nice_counts: dict[int, int] = {}
 
     for ps, geom, proposal, rate, steps, seed in cells:
@@ -183,14 +189,19 @@ def main() -> None:
             ntasks=1,
             cpus_per_task=CPUS_PER_TASK,
             mem=MEM,
-            nice=job_nice(seed),
             output=str(LOG_DIR / f"{name}_%j.log"),
         )
+        sbatch_cmd = f"sbatch --nice={job_nice(seed)}"
         if first_body is None:
-            first_body = (name, slurm, body)
+            first_body = (name, slurm, body, sbatch_cmd)
         nice_counts[job_nice(seed)] = nice_counts.get(job_nice(seed), 0) + 1
         if not args.dry_run:
-            slurm.sbatch(body)
+            # One rejected cell must not abandon the remaining hundreds.
+            try:
+                slurm.sbatch(body, sbatch_cmd=sbatch_cmd, verbose=False)
+            except Exception as exc:  # noqa: BLE001 - report and keep going
+                failed.append((name, repr(exc)[:200]))
+                continue
         submitted += 1
 
     print(f"grid cells        : {len(cells)}")
@@ -202,15 +213,21 @@ def main() -> None:
     print(f"total train steps : {total_steps/1e6:.1f}M "
           f"(~{total_steps/25/3600*1.75:.0f} GPU-h on a 2080 Ti, "
           f"~{total_steps/25/3600*1.75/8:.0f} h on all 8 GPUs)")
+    if failed:
+        print(f"FAILED to submit    : {len(failed)}")
+        for name, err in failed[:5]:
+            print(f"    {name}\n      {err}")
     for nice in sorted(nice_counts):
         tag = "seed 0 (runs first)" if nice == NICE_PRIMARY else "replicate seeds"
         print(f"  nice={nice:<3} {nice_counts[nice]:>5} jobs   {tag}")
     print(f"runs   -> {OUT_ROOT}/")
     print(f"logs   -> {LOG_DIR}/")
     if args.dry_run and first_body is not None:
-        name, slurm, body = first_body
-        print(f"\n--- example sbatch script: {job_name(name)} ---")
+        name, slurm, body, sbatch_cmd = first_body
+        print(f"\n--- example submission: {job_name(name)} ---")
+        print(f"$ {sbatch_cmd} << EOF")
         print(f"{slurm}\n{body}")
+        print("EOF")
 
 
 if __name__ == "__main__":
