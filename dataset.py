@@ -71,7 +71,8 @@ class UnigramDataModule(L.LightningDataModule):
         ps = process_ps(ps)
         return -(ps * torch.log(ps)).sum()
 
-    STRING_PS = (PS_NAIVE, PS_CMPLX, "cmplx_ps1", "c1e3_exp1.0", "c1e4_exp1.0", "c1e5_exp1.0")
+    STRING_PS = (PS_NAIVE, PS_CMPLX, "cmplx_ps1", "c1e2_exp1.0", "c1e3_exp1.0",
+                 "c1e4_exp1.0", "c1e5_exp1.0")
 
     @staticmethod
     def _exp_decay_ps(n: int, lam: float = 1.0):
