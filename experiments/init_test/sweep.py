@@ -3,7 +3,7 @@
 
 Grid is exactly experiments/init_test/setup.md:
 
-    ps                     {naive_ps, cmplx_ps}
+    ps                     {naive_ps, cmplx_ps, c1e2/c1e3/c1e4_exp1.0}
     loss_proposal_type     {exp}
     loss_proposal_exp_rate {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
     loss_geometry          {cross_entropy, poincare_polar}
@@ -50,7 +50,10 @@ LOG_DIR = Path("experiments") / PROJECT / "logs"
 CONDA_BIN = "/home/sc3379/anaconda3/envs/sfm/bin"
 
 # --- grid (setup.md) -------------------------------------------------------
-PS_LIST = ["naive_ps", "cmplx_ps"]
+# c1e{2,3,4}_exp1.0 are geometric p_i ~ e^-i truncated at V=100/1000/10000.
+# Measured on the 2080 Ti at batch 2048: peak 0.10 / 0.79 / 7.58 GiB of 10.6, and
+# 0.016 / 0.017 / 0.122 s/step -- c1e4 fits but is the expensive corner of the grid.
+PS_LIST = ["naive_ps", "cmplx_ps", "c1e2_exp1.0", "c1e3_exp1.0", "c1e4_exp1.0"]
 PROPOSALS = ["exp"]
 EXP_RATES = ["0.01", "0.05", "0.1", "0.25", "0.5", "0.75", "1.0"]
 # abbreviation -> (train script, hydra loss_geometry) ; abbreviations match name_ext

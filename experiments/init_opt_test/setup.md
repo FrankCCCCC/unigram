@@ -5,12 +5,12 @@
 - Project name: ``init_opt_test``
 
 ### Dataset
-- ``ps``: {``naive_ps``, ``cmplx_ps``}
+- ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e2_exp1.0``, ``c1e3_exp1.0``, ``c1e4_exp1.0``}
     - ``naive_ps``: [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
     - ``cmplx_ps``: [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
-    - ``c1e2_exp1.0``: exp_decay_ps(n=100, lam=1.0)
-    - ``c1e3_exp1.0``: exp_decay_ps(n=1000, lam=1.0)
-    - ``c1e4_exp1.0``: exp_decay_ps(n=10000, lam=1.0)
+    - ``c1e2_exp1.0``: class=100, $\exp(\lambda=1.0)$
+    - ``c1e3_exp1.0``: class=1000, $\exp(\lambda=1.0)$
+    - ``c1e4_exp1.0``: class=10000, $\exp(\lambda=1.0)$
 
 ### Training
 - ``hyper_dim``: 2

@@ -5,9 +5,12 @@
 - Project name: ``init_test``
 
 ### Dataset
-- ``ps``: {``naive_ps``, ``cmplx_ps``}
+- ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e2_exp1.0``, ``c1e3_exp1.0``, ``c1e4_exp1.0``}
     - ``naive_ps``: [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
     - ``cmplx_ps``: [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
+    - ``c1e2_exp1.0``: class=100, $\exp(\lambda=1.0)$
+    - ``c1e3_exp1.0``: class=1000, $\exp(\lambda=1.0)$
+    - ``c1e4_exp1.0``: class=10000, $\exp(\lambda=1.0)$
 
 ### Training
 - ``hyper_dim``: 2
@@ -27,7 +30,7 @@
 
 ---
 
-# Results
+# Results of naive_ps
 
 ---
 
@@ -95,7 +98,7 @@ Each cell: avg & std across seed
 
 ---
 
-# Results
+# Results of cmplx_ps
 
 ---
 
@@ -148,6 +151,66 @@ Each cell: avg & std across seed
 ---
 
 ## cmplx_ps, Training Step 200000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+# Results of c1e2_exp1.0
+
+---
+
+## c1e2_exp1.0, Training Step 20000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+# Results of c1e3_exp1.0
+
+---
+
+## c1e3_exp1.0, Training Step 20000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## Results of c1e4_exp1.0
+
+---
+
+## c1e4_exp1.0, Training Step 20000
 
 Each cell: avg & std across seed
 
