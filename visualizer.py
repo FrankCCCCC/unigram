@@ -71,6 +71,7 @@ def plot_loss_curves(
     title: str = "Loss vs Steps",
     moving_average_window: int | None = None,
     show_raw: bool = True,
+    log_y: bool = False,
 ):
     available_series = [
         name for name in series_names if recorder.get_items(name)
@@ -110,7 +111,11 @@ def plot_loss_curves(
 
     ax.set_xlabel("steps")
     ax.set_ylabel("loss")
-    # ax.set_yscale("log")
+    if log_y:
+        # These losses span orders of magnitude early in training, so the linear
+        # axis hides everything after the first few hundred steps. Non-positive
+        # values cannot be drawn on a log axis; matplotlib drops them silently.
+        ax.set_yscale("log")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     if len(available_series) > 1:
