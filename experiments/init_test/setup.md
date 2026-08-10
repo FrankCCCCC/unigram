@@ -25,3 +25,138 @@
 - ``ref_proposal_type``: exp
 - ``ref_proposal_exp_rate``: 0.1
 
+---
+
+# Results
+
+---
+
+## naive_ps, Training Step 20000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## naive_ps, Training Step 40000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## naive_ps, Training Step 100000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## naive_ps, Training Step 200000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+# Results
+
+---
+
+## cmplx_ps, Training Step 20000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## cmplx_ps, Training Step 40000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## cmplx_ps, Training Step 100000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+---
+
+## cmplx_ps, Training Step 200000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
+|---|---|---|---|---|---|---|
