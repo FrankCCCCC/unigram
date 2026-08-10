@@ -9,20 +9,21 @@ from dataset import UnigramDataModule, process_ps
 from loss import FlowPath, HyperBridge, Loss, LossGeometry, Proposal
 from model import MLPLM, OptimalModel
 from utils import TaskMgr, save_results
-from visualizer import DataMgr, Recorder
+from visualizer import DataMgr
+from trainer import BaseTrainer
 
-class HyperbolicDLM(L.LightningModule):
+class HyperbolicDLM(BaseTrainer):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
         self.bridge = HyperBridge()
-        self.recorder = Recorder()
 
         self.model_input_dim = config.hyper_dim
         # If False the per-word boundary angles phi_v stay fixed at (v+0.5)*2*pi/V
         # instead of being read off the lm-head; the lm-head still trains as the
         # logit readout. See the word_embedding property.
         self.trainable_word_embedding = config.trainable_word_embedding
+        self.seed = config.seed
 
         if self.config.mode == "tnb":
             self.model = MLPLM(
@@ -38,7 +39,7 @@ class HyperbolicDLM(L.LightningModule):
                 ps=process_ps(config.ps),
             )
         else:
-            raise ValueError(f"mode shouldn't be {self.mode}, only support tnb and opt.")
+            raise ValueError(f"mode shouldn't be {self.config.mode}, only support tnb and opt.")
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=float(self.config.lr))
@@ -52,26 +53,7 @@ class HyperbolicDLM(L.LightningModule):
         # False.
         if not self.trainable_word_embedding:
             return None
-        head = getattr(self.model, "lm_head", None)
-        return head.weight if head is not None else None
-
-    def _make_step_generator(self, salt: int, batch_idx: int = 0, stage: int = 0) -> torch.Generator:
-        """Per-step, per-batch, per-path torch.Generator on self.device.
-
-        batch_idx and stage must be part of the seed: Lightning does not advance
-        global_step during validate/test, so seeding on global_step alone gives
-        every eval batch the identical t vector (measured: 1953/1953 test batches
-        byte-identical). The estimator stays unbiased but its standard error hits
-        a floor that raising test_size cannot lower -- ~2x wider than it looks.
-        """
-        seed_value = (
-            self.config.seed * 1_000_003
-            + int(self.global_step) * 7_919
-            + int(batch_idx) * 104_729
-            + int(stage) * 15_485_863
-            + int(salt)
-        ) & 0x7FFF_FFFF_FFFF_FFFF
-        return torch.Generator(device=self.device).manual_seed(seed_value)
+        return self.model.word_embedding
 
     def get_logits_inputs(
         self,
@@ -183,108 +165,15 @@ class HyperbolicDLM(L.LightningModule):
         )
 
         return {
-            "loss": loss,
-            "wloss": wloss,
-            "wnelbo_ref": wnelbo_ref,
-            "nelbo_ref": nelbo_ref,
-            "wce_ref": wce_ref,
-            "ce_ref": ce_ref,
+            self.UNWEIGHTED_LOSS_KEY: loss,
+            self.WEIGHTED_LOSS_KEY: wloss,
+            self.WEIGHTED_NELBO_REF_KEY: wnelbo_ref,
+            self.UNWEIGHTED_NELBO_REF_KEY: nelbo_ref,
+            self.WEIGHTED_CE_REF_KEY: wce_ref,
+            self.UNWEIGHTED_CE_REF_KEY: ce_ref,
             "ts": ts_loss.to(dtype=torch.float32),
             "proposal_weight": pw_loss.to(dtype=torch.float32),
         }
-
-    def _log_losses(self, losses, stage: str, **log_kwargs):
-        # "loss" is the training objective (loss_geometry, importance-weighted).
-        # "wnelbo" is the poincare-polar ELBO estimate: the importance-weighted
-        # integrand, so its mean estimates the whole integral over t. "nelbo" is
-        # the same integrand unweighted (not an ELBO on its own -- it is what the
-        # per-t loss looks like under the proposal). "ce" is the plain denoising
-        # cross-entropy.
-        wloss = losses["wloss"].mean()
-        self.log(f"{stage}_wloss", wloss, **log_kwargs)
-        self.log(f"{stage}_wnelbo_ref", losses["wnelbo_ref"].mean(), **log_kwargs)
-        self.log(f"{stage}_nelbo_ref", losses["nelbo_ref"].mean(), **log_kwargs)
-        self.log(f"{stage}_wce_ref", losses["wce_ref"].mean(), **log_kwargs)
-        self.log(f"{stage}_ce_ref", losses["ce_ref"].mean(), **log_kwargs)
-        if log_kwargs.get("on_epoch"):
-            # Epoch-aggregated std must come from pooled sums, not from
-            # self.log(...).std(): Lightning would average the PER-BATCH stds,
-            # and one 2048-sample batch rarely contains the tail of these
-            # heavy-tailed integrands, so that underestimates by ~7%.
-            self._accumulate_std(losses)
-        else:
-            for key in self.STD_KEYS:
-                self.log(f"{stage}_{key}_std", losses[key].std(), **log_kwargs)
-        return wloss
-
-    # Quantities that also get a standard deviation reported.
-    STD_KEYS = ("wloss", "wnelbo_ref", "wce_ref")
-
-    def _reset_std_accum(self) -> None:
-        # per key: [sum, sum of squares, count]
-        self._std_accum = {key: [0.0, 0.0, 0] for key in self.STD_KEYS}
-
-    def _accumulate_std(self, losses) -> None:
-        for key in self.STD_KEYS:
-            values = losses[key].detach().to(dtype=torch.float64)
-            acc = self._std_accum[key]
-            acc[0] += float(values.sum().cpu())
-            acc[1] += float(values.square().sum().cpu())
-            acc[2] += int(values.numel())
-
-    @staticmethod
-    def _std_from_sums(total: float, sq_total: float, count: int) -> float:
-        if count <= 1:
-            return 0.0
-        return (max(sq_total - total * total / count, 0.0) / (count - 1)) ** 0.5
-
-    def _log_std_accum(self, stage: str) -> None:
-        for key, (total, sq_total, count) in self._std_accum.items():
-            self.log(
-                f"{stage}_{key}_std",
-                torch.tensor(
-                    self._std_from_sums(total, sq_total, count),
-                    device=self.device,
-                    dtype=torch.float64,
-                ),
-            )
-
-    def training_step(self, batch: torch.Tensor, batch_idx: int):
-        losses = self._compute_losses(batch, batch_idx=batch_idx, stage=0)
-        loss = self._log_losses(losses, "train", on_step=True, on_epoch=False, prog_bar=True)
-        self.recorder.add("train_loss", step=int(self.global_step) + 1, val=loss)
-        return loss
-
-    def validation_step(self, batch: torch.Tensor, batch_idx: int):
-        return self._log_losses(
-            self._compute_losses(batch, batch_idx=batch_idx, stage=1), "val", on_step=False, on_epoch=True, prog_bar=True
-        )
-
-    def on_validation_epoch_start(self):
-        self._reset_std_accum()
-
-    def on_validation_epoch_end(self):
-        if not self.trainer.sanity_checking:
-            self._log_std_accum("val")
-            self.recorder.add(
-                "val_loss", step=int(self.global_step), val=self.trainer.callback_metrics["val_wloss"]
-            )
-
-    def test_step(self, batch: torch.Tensor, batch_idx: int):
-        return self._log_losses(
-            self._compute_losses(batch, batch_idx=batch_idx, stage=2), "test", on_step=False, on_epoch=True, prog_bar=True
-        )
-
-    def on_test_epoch_start(self):
-        self._reset_std_accum()
-
-    def on_test_epoch_end(self):
-        self._log_std_accum("test")
-        self.recorder.add(
-            "test_loss",
-            step= int(self.global_step) + 1,
-            val=self.trainer.callback_metrics["test_wloss"],
-        )
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:

@@ -71,6 +71,12 @@ class MLPLM(nn.Module):
                 self.lm_head.weight.copy_(
                     uniform_sphere_points(vocab_size, output_dim).to(self.lm_head.weight.dtype)
                 )
+    @property
+    def word_embedding(self) -> torch.Tensor:
+        # The lm_head weight IS the boundary embedding: row v is word v's
+        # direction, so the shape contract is (vocab_size, output_dim) -- the
+        # (V, 2) that _vocab_angles / the polar losses assert.
+        return self.lm_head.weight
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
@@ -159,6 +165,11 @@ class MLPNLM(nn.Module):
             depth=depth,
             output_dim=max_length * embedding_size,
         )
+
+    @property
+    def word_embedding(self) -> torch.Tensor:
+        # (vocab_size, embedding_size), same row-per-word contract as MLPLM.
+        return self.embedding.weight
 
     def normalize_word_embedding(self) -> torch.Tensor:
         """Return the embedding table with each row rescaled to unit L2-norm.
@@ -402,6 +413,10 @@ class OptimalModel(nn.Module):
         print(f"self.ps: {self.log_ps.exp()}")
         print(f"self.log_ps: {self.log_ps}")
 
+    @property
+    def word_embedding(self) -> Optional[torch.Tensor]:
+        return None
+
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         Evaluate the Bayes-optimal logits.
@@ -441,8 +456,26 @@ class OptimalModel(nn.Module):
         expectation = poisson_posterior(x, v, self.log_ps)
         return bridge_drift(x, expectation).float()
 
-def get_model(config):
-    if config.model_type == "opt":
-        return OptimalModel(ps=config.ps)
+def get_model(
+    model_type: str,
+    ps: str = None,
+    vocab_size: int = None,
+    input_dim: int = None,
+    output_dim: int = None,
+    hidden_size: int = None,
+    depth: int = None,
+    unif_word_embedding: bool = True,
+):
+    if model_type == "opt":
+        return OptimalModel(ps=ps)
+    elif model_type == "tnb":
+        return MLPLM(
+            vocab_size=vocab_size,
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_size=hidden_size,
+            depth=depth,
+            unif_word_embedding=unif_word_embedding,
+        )
     else:
-        raise ValueError(f"model_type {config.model_type} is not supported.")
+        raise ValueError(f"model_type {model_type} is not supported.")
