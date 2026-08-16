@@ -178,6 +178,7 @@ class HyperBridge:
             word_embedding=word_embedding,
         )
         sin_alphas = alphas.sin()
+        # cos_alphas = alphas.cos()
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
         mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
@@ -190,6 +191,10 @@ class HyperBridge:
             sin_alphas,
             cos_half_sq * (-rhos[:,None]).exp() - sin_half_sq * rhos[:,None].exp(),
         )
+        # betas = torch.atan2(
+        #     sin_alphas,
+        #     rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None]
+        # )
         cos_errors = (betas.cos() * mu).sum(-1)
         sin_errors = (betas.sin() * mu).sum(-1)
         return (cos_errors.square() + sin_errors.square())/2
