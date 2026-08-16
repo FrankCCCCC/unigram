@@ -64,7 +64,7 @@ class MLPLM(nn.Module):
         if unif_word_embedding:
             # lm_head.weight IS the word embedding the bridge and loss read: each
             # row's direction is that word's boundary angle phi_v = atan2(e_v)
-            # (see HyperbolicDLM.word_embedding / HyperBridge._vocab_angles).
+            # (see HyperbolicDLM.word_embedding / HyperBridge._binary_vocab_angles).
             # nn.Linear's default kaiming-uniform init leaves those angles badly
             # clustered, so spread them evenly instead.
             with torch.no_grad():
@@ -75,7 +75,7 @@ class MLPLM(nn.Module):
     def word_embedding(self) -> torch.Tensor:
         # The lm_head weight IS the boundary embedding: row v is word v's
         # direction, so the shape contract is (vocab_size, output_dim) -- the
-        # (V, 2) that _vocab_angles / the polar losses assert.
+        # (V, 2) that _binary_vocab_angles / the polar losses assert.
         return self.lm_head.weight
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -263,7 +263,7 @@ def uniform_sphere_points(
     For `d == 2` the evenly spread configuration is known in closed form -- the
     equally spaced angles `(v + 0.5) * 2*pi / V` of `vocab_points` -- and is
     used directly, so the 2-D case reproduces the fixed angles the loss falls
-    back to (see `HyperBridge._vocab_angles` with `word_embedding=None`). For
+    back to (see `HyperBridge._binary_vocab_angles` with `word_embedding=None`). For
     `d > 2` no exact even packing exists for general `V`, so the rows are drawn
     uniformly from the sphere by normalizing isotropic Gaussians: exact in
     distribution, `O(V*d)`, and seeded so the table is reproducible.

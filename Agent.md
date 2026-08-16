@@ -187,7 +187,7 @@ Break any of these and the numbers silently stop meaning what they claim:
    exact Bayes solution, and the weighted CE becomes a divergent integral.
 2. **`test_wnelbo_ref >= H(p)`.** `H(naive_ps) = 0.5003`, `H(cmplx_ps) = 1.6664`,
    `H(cmplx_ps1) = 2.2985` nats. A trained model dipping *below* `H(p)` means a side channel
-   leaked — historically, leaving `theta` unwrapped in `rotate_with_target` (it must be
+   leaked — historically, leaving `theta` unwrapped in `binary_rotate_with_target` (it must be
    `remainder(..., 2*pi)`, since the loss only ever sees `theta mod 2*pi`).
 3. **Bridge quantities stay float64.** `ts`, `rhos`, `thetas` and the whole horosphere
    computation are float64; only the model input `z` and the logits are cast to float32.
