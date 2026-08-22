@@ -272,13 +272,13 @@ class HyperBridge:
 
         """
         # Rotate the spike (at angle 0) onto each target word's boundary angle,
-        # using the same word->angle map the loss uses (see _binary_vocab_angles).
-        phis = HyperBridge._binary_vocab_angles(
+        # using the same word->angle map the loss uses (see _vocab_angles).
+        phis = HyperBridge._vocab_angles(
             vocab_size=vocab_size,
             emb_dim=emb_dim,
             word_embedding=word_embedding,
         )
-        pass
+        # TODO: Implement the rotation for arbitary dim
 
     @staticmethod
     def bridge(
@@ -304,7 +304,7 @@ class HyperBridge:
         log p)` is exactly the Bayes posterior q(y | z_t). Every consumer of the
         logits must therefore treat them as a RESIDUAL on top of this term.
         """
-        phis = HyperBridge._binary_vocab_angles(
+        phis = HyperBridge._vocab_angles(
             vocab_size=vocab_size,
             device=rhos.device,
             dtype=torch.float64,
@@ -314,40 +314,25 @@ class HyperBridge:
 
     @staticmethod
     def bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas, word_embedding=None):
-        (N,) = targets.shape
-        (N,V) = logits.shape
-        assert(rhos.shape == (N,))
-        assert(thetas.shape == (N,))
-        assert(targets.dtype == torch.int64)
-        assert(rhos.dtype == torch.float64)
-        assert(thetas.dtype == torch.float64)
-        assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
+        # (N,) = targets.shape
+        # (N,V) = logits.shape
+        # assert(rhos.shape == (N,))
+        # assert(thetas.shape == (N,))
+        # assert(targets.dtype == torch.int64)
+        # assert(rhos.dtype == torch.float64)
+        # assert(thetas.dtype == torch.float64)
+        # assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
         # betas below needs exp(+rho), which overflows past rho ~ 709 and then
         # yields 0 * inf = NaN for the target word. binary_bridge already caps
         # rho, so this only defends against callers passing raw values.
         rhos = rhos.clamp_max(HyperBridge.RHO_MAX)
-        alphas, sin_half_sq, cos_half_sq, horosphere_dists = HyperBridge.binary_horosphere_geometry(
+        alphas, sin_half_sq, cos_half_sq, horosphere_dists = HyperBridge.horosphere_geometry(
             rhos=rhos,
             thetas=thetas,
             vocab_size=V,
             word_embedding=word_embedding,
         )
-        sin_alphas = alphas.sin()
-        # remake mu and subtract the target
-        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
-        mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
-        # next, we transform the angles alpha after motion by rho.
-        # cosh(rho) cos(a) - sinh(rho), again cancellation-free: the direct form
-        # collapses to cosh(rho) - sinh(rho), which is 0 in float64 once
-        # rho > ~19 even though the true value is e^-rho, and atan2(0, 0) has no
-        # gradient.
-        betas = torch.atan2(
-            sin_alphas,
-            cos_half_sq * (-rhos[:,None]).exp() - sin_half_sq * rhos[:,None].exp(),
-        )
-        cos_errors = (betas.cos() * mu).sum(-1)
-        sin_errors = (betas.sin() * mu).sum(-1)
-        return (cos_errors.square() + sin_errors.square())/2
+        # TODO: Implement Polar Poincare Disk ELBO for arbitrary dim
 
 class Loss:
     """
