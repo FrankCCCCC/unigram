@@ -1,7 +1,11 @@
+import math
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
+
+from geo_bridge import HyperbolicHeatKernel
+from model import uniform_sphere_points
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
@@ -239,100 +243,216 @@ class HyperBridge:
     """
     @staticmethod
     def _vocab_angles(
-        vocab_size: int = None,
-        emb_dim: int = None,
+        vocab_size: Optional[int] = None,
+        emb_dim: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: torch.dtype = torch.float64,
         word_embedding: Optional[torch.FloatTensor] = None,
     ):
-        """
-        word_embedding: torch.FloatTensor : [V, d]
-        return: 
-            if word_embedding is None:
-                Return uniformly distributed spherical word embedding
-                return [V, d], \in \mathbb{S}^{d-1}
-            else:
-                Rotate the uniformly distribution with direction of word_embedding
-                return [V, d], \in \mathbb{S}^{d-1}
-        """
+        # Boundary direction phi_v on S^{d-1} for every vocabulary word v -- the
+        # d-dimensional analogue of _binary_vocab_angles.
+        #   word_embedding given : direction of each word's d-D embedding. The
+        #     L2-normalization is a no-op for the direction and only fixes the
+        #     scale.
+        #   word_embedding None  : uniform_sphere_points(V, d) -- the same fixed
+        #     table MLPLM uses for unif_word_embedding (equally spaced angles at
+        #     d == 2, seeded Gaussian directions at d > 2), regenerated
+        #     deterministically so the bridge and the loss share one
+        #     word -> direction map.
         if word_embedding is None:
-            if vocab_size is not None and emb_dim is not None:
-                word_embedding = torch.randn(vocab_size, emb_dim)
-        e = word_embedding
-        e = e / e.norm(dim=-1, p=2, keepdim=True)
-        return e
+            return uniform_sphere_points(vocab_size, emb_dim, device=device, dtype=dtype)
+        e = word_embedding.to(dtype)
+        return e / e.norm(dim=-1, p=2, keepdim=True).clamp_min(torch.finfo(dtype).tiny)
 
     @staticmethod
     def rotate_with_target(
         thetas: torch.FloatTensor,
         targets: torch.LongTensor,
-        vocab_size: int = None,
-        emb_dim: int = None,
+        vocab_size: Optional[int] = None,
+        emb_dim: Optional[int] = None,
         word_embedding: Optional[torch.FloatTensor] = None,
     ):
-        """
-
-        """
-        # Rotate the spike (at angle 0) onto each target word's boundary angle,
-        # using the same word->angle map the loss uses (see _vocab_angles).
+        # Carry the spike (centred on e_1) onto each target word's boundary
+        # direction, using the same word -> direction map the loss uses (see
+        # _vocab_angles). The Householder reflection e_1 -> phi_y is an isometry
+        # of S^{d-1} and the spike law is rotationally symmetric about e_1, so
+        # reflecting instead of rotating leaves the bridge law unchanged. Unlike
+        # the scalar-angle path (see binary_rotate_with_target) there is no
+        # wrap-around side channel to close: a unit vector carries no winding
+        # count for the loss to miss.
         phis = HyperBridge._vocab_angles(
             vocab_size=vocab_size,
             emb_dim=emb_dim,
+            device=thetas.device,
+            dtype=thetas.dtype,
             word_embedding=word_embedding,
         )
-        # TODO: Implement the rotation for arbitary dim
+        return HyperbolicHeatKernel._reflect_to_target(thetas, phis[targets])
+
+    @staticmethod
+    def _radial_t_max(d: int) -> float:
+        # Largest heat time sample_radial can integrate in float64: it forms the
+        # marginal sinh^{d-1}(rho) p_H(rho; t) in linear space over a grid
+        # reaching rho ~ sqrt(t) (E[chi_d] + 16) + (d-1) t / 2, and its even-d
+        # McKean base evaluates cosh a further 8 sqrt(t) + 1 beyond it; both
+        # overflow once the exponent passes ~709. Solving
+        #   0.5 (d-1) t + (E[chi_d] + 24) sqrt(t) + 1 <= 700 / (d-1)
+        # for sqrt(t) keeps the whole grid representable for every d >= 2.
+        b = HyperbolicHeatKernel._euclid_mean(d) + 24.0
+        c = 700.0 / (d - 1) - 1.0
+        half_a = 0.5 * (d - 1)
+        s = (math.sqrt(b * b + 4.0 * half_a * c) - b) / (2.0 * half_a)
+        return s * s
 
     @staticmethod
     def bridge(
         ts,
         targets: torch.LongTensor,
-        vocab_size: int,
+        vocab_size: Optional[int] = None,
+        emb_dim: Optional[int] = None,
         word_embedding: Optional[torch.FloatTensor] = None,
     ):
-        # Radial sampling. cosh overflows to +inf for ss > 710, which would make
-        # rho = +inf and NaN the whole batch -- reachable with proposal_type=unif
-        # at the shipped hyper_T (t up to 1e5 gives ~99% non-finite rho). Capping
-        # rho is statistically a no-op: by RHO_MAX the bridge angle already
-        # identifies the target to full float64 precision (exp(-2*rho) underflows
-        # past ~372), so every larger rho is indistinguishable from RHO_MAX.
-        return ps, thetas
+        """Sample the H^d bridge state `(rhos, us)` at heat times `ts`.
+
+        d-dimensional analogue of binary_bridge. The bridge toward a boundary
+        word factorizes exactly: the radial coordinate keeps the FREE
+        heat-kernel marginal (the Poisson kernel is harmonic with unit
+        spherical mean, so conditioning on the target does not disturb it) and
+        the direction follows the Poisson kernel
+        `(cosh rho - sinh rho <u, e_1>)^-(d-1)` centred on e_1, carried onto
+        the target word's boundary direction. `d` comes from
+        `word_embedding.shape[-1]` when given, else `emb_dim`.
+
+        binary_bridge is the d == 2 special case in closed form (Gruet) and is
+        much cheaper; this path prices any d >= 2 through sample_radial's
+        numeric inverse-CDF.
+
+        Returns `(rhos, us)`: shapes `(N,)` and `(N, d)`, both `ts.dtype`.
+        """
+        d = word_embedding.shape[-1] if word_embedding is not None else emb_dim
+        # Radial sampling. sample_radial forms the heat-kernel marginal in
+        # linear float64, which overflows at large t (reachable with
+        # proposal_type=unif at the shipped hyper_T). Clamping t is
+        # statistically a no-op for the same reason capping rho is: by
+        # _radial_t_max the radial mass sits at rho ~ 700/(d-1), where the
+        # direction already identifies the target to full float64 precision
+        # (exp(-2*(d-1)*rho) underflows past rho ~ 372/(d-1)), so every larger
+        # t is indistinguishable.
+        ts = ts.clamp_max(HyperBridge._radial_t_max(d))
+        rhos = HyperbolicHeatKernel.sample_radial(ts, d=d, seq_len=1).squeeze(-1)
+        rhos = rhos.clamp_max(HyperBridge.RHO_MAX)
+
+        # Spike direction on e_1
+        us = HyperbolicHeatKernel._angular_boost(rhos, d=d)
+
+        us = HyperBridge.rotate_with_target(
+            thetas=us,
+            targets=targets,
+            vocab_size=vocab_size,
+            emb_dim=emb_dim,
+            word_embedding=word_embedding,
+        )
+        return rhos, us
 
     @staticmethod
     def horosphere_geometry(rhos, thetas, vocab_size, word_embedding=None):
-        """Shared geometry: (alphas, sin_half_sq, cos_half_sq, horosphere_dists).
+        """Shared geometry: (phis, sin_half_sq, cos_half_sq, horosphere_dists).
 
-        `horosphere_dists[n, v]` is the log density of the bridge angle at word
-        v, up to a v-independent constant, so `softmax(horosphere_dists +
-        log p)` is exactly the Bayes posterior q(y | z_t). Every consumer of the
-        logits must therefore treat them as a RESIDUAL on top of this term.
+        d-dimensional analogue of binary_horosphere_geometry, with the bridge
+        direction `thetas` a unit vector of shape (N, d) instead of a scalar
+        angle. `horosphere_dists[n, v] = -(d-1) B_v(z_n)` -- `B_v` the Busemann
+        function of word v's boundary point -- is the log density of the bridge
+        direction at word v, up to a v-independent constant, so
+        `softmax(horosphere_dists + log p)` is exactly the Bayes posterior
+        q(y | z_t). Every consumer of the logits must therefore treat them as a
+        RESIDUAL on top of this term.
         """
         phis = HyperBridge._vocab_angles(
             vocab_size=vocab_size,
+            emb_dim=thetas.shape[-1],
             device=rhos.device,
             dtype=torch.float64,
             word_embedding=word_embedding,
         )
-        # TODO: arbiarty dim horosphere geo
+        d = phis.shape[-1]
+        # The half-angle identities of the binary path in vector form:
+        #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
+        #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
+        # The difference form is just as cancellation-free: evaluating
+        # 1 - <u, phi_v> directly collapses to 0 once the bridge direction is
+        # within ~1e-8 of the target word, its log to -inf, and the backward
+        # pass to 0 * inf = NaN.
+        diffs = thetas[:, None, :] - phis[None, :, :]
+        sums = thetas[:, None, :] + phis[None, :, :]
+        sin_half_sq = diffs.square().sum(-1) / 4
+        cos_half_sq = sums.square().sum(-1) / 4
+        # -(d-1) log(cosh rho - sinh rho <u, phi_v>), with e^rho pulled out of
+        # the log so nothing overflows. clamp_min keeps the log finite once
+        # BOTH terms underflow (rho > ~372.6, where sin_half_sq is exactly 0
+        # for the target word); without it horosphere_dists is +inf and the
+        # softmax downstream returns NaN for the whole row.
+        horosphere_dists = -(d - 1) * (
+            rhos[:, None] + (
+                sin_half_sq + cos_half_sq * (-2 * rhos[:, None]).exp()
+            ).clamp_min(torch.finfo(torch.float64).tiny).log()
+        )
+        return phis, sin_half_sq, cos_half_sq, horosphere_dists
 
     @staticmethod
     def bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas, word_embedding=None):
-        # (N,) = targets.shape
-        # (N,V) = logits.shape
-        # assert(rhos.shape == (N,))
-        # assert(thetas.shape == (N,))
-        # assert(targets.dtype == torch.int64)
-        # assert(rhos.dtype == torch.float64)
-        # assert(thetas.dtype == torch.float64)
-        # assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
-        # betas below needs exp(+rho), which overflows past rho ~ 709 and then
-        # yields 0 * inf = NaN for the target word. binary_bridge already caps
-        # rho, so this only defends against callers passing raw values.
+        (N,) = targets.shape
+        (N,V) = logits.shape
+        d = thetas.shape[-1]
+        assert(rhos.shape == (N,))
+        assert(thetas.shape == (N, d))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, d)
+        # ws below needs exp(+rho), which overflows past rho ~ 709 and then
+        # yields 0 * inf = NaN for the target word. bridge already caps rho, so
+        # this only defends against callers passing raw values.
         rhos = rhos.clamp_max(HyperBridge.RHO_MAX)
-        alphas, sin_half_sq, cos_half_sq, horosphere_dists = HyperBridge.horosphere_geometry(
+        phis, sin_half_sq, cos_half_sq, horosphere_dists = HyperBridge.horosphere_geometry(
             rhos=rhos,
             thetas=thetas,
             vocab_size=V,
             word_embedding=word_embedding,
         )
-        # TODO: Implement Polar Poincare Disk ELBO for arbitrary dim
+        # remake mu and subtract the target
+        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
+        mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
+        # next, we transport each word's boundary direction into the frame at
+        # z: the boost carrying z = (rho, u) back to the origin maps phi_v to
+        # the unit vector
+        #   w_v = [(cos_half_sq e^-rho - sin_half_sq e^+rho) u + p_v] / D_v,
+        #   p_v = phi_v - <u, phi_v> u,
+        #   D_v = sin_half_sq e^+rho + cos_half_sq e^-rho,
+        # the d-dimensional form of the binary
+        # betas = atan2(sin a, cos_half_sq e^-rho - sin_half_sq e^+rho): at
+        # d == 2, w_v = (cos beta_v, sin beta_v) in the (u, u_perp) basis. As
+        # there, the e^{+-rho} split is cancellation-free: the direct
+        # cosh(rho) <u, phi_v> - sinh(rho) collapses to 0 in float64 once
+        # rho > ~19 even though the true value is e^-rho.
+        exp_pos = rhos[:,None].exp()
+        exp_neg = (-rhos[:,None]).exp()
+        radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
+        # D_v is the Poisson-kernel denominator rescaled by e^-rho; it reaches
+        # 0 only past rho ~ 745, which RHO_MAX already rules out, so the clamp
+        # is a guard, not a code path.
+        denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(
+            torch.finfo(torch.float64).tiny
+        )
+        inners = cos_half_sq - sin_half_sq  # <u, phi_v>, cancellation-free
+        perps = phis[None,:,:] - inners[...,None] * thetas[:,None,:]
+        ws = (radial_parts[...,None] * thetas[:,None,:] + perps) / denoms[...,None]
+        # The bridge drift toward word v is (d-1) w_v (the Doob h-transform of
+        # h_v = e^{-(d-1) B_v} under generator Delta/2), so the Girsanov
+        # integrand between the model's posterior-mixture drift and the target
+        # bridge drift is (d-1)^2/2 ||sum_v mu_v w_v||^2 -- the (d-1)^2 factor
+        # is 1 in the binary case.
+        errors = (mu[...,None] * ws).sum(-2)
+        return (d - 1) ** 2 * errors.square().sum(-1) / 2
 
 class Loss:
     """

@@ -121,9 +121,10 @@ dataset.py        UnigramDataset / UnigramDataModule. Resolves the `ps` spec int
 utils.py          TaskMgr (finished.json idempotency marker), save_results.
 visualizer.py     Recorder (in-memory metric series), loss-curve and embedding-
                   concentration plots, DataMgr (writes both to the run folder).
-geo_bridge.py     Standalone H^2 heat-kernel / geodesic library. NOT imported by
-                  anything yet — a staging area for the general-d bridge. Math is
-                  documented in old/hyper_dm.md.
+geo_bridge.py     Standalone H^2 / H^d heat-kernel / geodesic library. loss.py
+                  imports it for the general-d bridge (sample_radial,
+                  _angular_boost, _reflect_to_target). Math is documented in
+                  old/hyper_dm.md.
 config/config.yaml  The only live config. config/data/unigram0109.yaml is empty and
                   unreferenced (config.yaml has no `defaults:` list).
 experiments/      One folder per experiment project (see below). Untracked.

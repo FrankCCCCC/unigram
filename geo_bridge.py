@@ -970,13 +970,16 @@ class HyperbolicHeatKernel(GeoUtils):
         tiny = torch.finfo(rho.dtype).tiny
         nu = HyperbolicHeatKernel._RADIAL_NU
         # Per-rho upper limit: the integrand mass sits at s in [rho, rho + ~8 sqrt(t)]
-        # (e^{-s^2/2t} decreasing, lower limit s = rho). A single grid-wide u_max would
-        # under-resolve small rho when the grid extends to large rho, so set u_max(rho).
-        s_max = rho + 8.0 * ts.sqrt() + 1.0                         # (B, ngrid)
-        u_max = (torch.cosh(s_max) - torch.cosh(rho)).clamp_min(tiny).sqrt()  # (B, ngrid)
+        # (e^{-s^2/2t} decreasing, lower limit s = rho). Nodes are placed uniformly in
+        # s -- not in u = sqrt(cosh s - cosh rho), whose exponential stretching packs
+        # the whole e^{-s^2/2t} mass into the first few nodes of a linear u-grid once
+        # 8 sqrt(t) >> 1 (measured: ~10% radial-mean bias at d=2, t=5 against the
+        # exact Gruet sampler). The trapezoid runs on the induced nonuniform u grid,
+        # which still removes the 1/sqrt(cosh s - cosh rho) endpoint singularity.
+        s_span = 8.0 * ts.sqrt() + 1.0                              # (B, 1)
         unit = torch.linspace(0.0, 1.0, nu, dtype=rho.dtype, device=rho.device)
-        uu = unit.view(1, 1, nu) * u_max.unsqueeze(-1)             # (B, ngrid, nu)
-        s = torch.acosh((torch.cosh(rho).unsqueeze(-1) + uu * uu).clamp_min(1.0))  # (B,ngrid,nu)
+        s = rho.unsqueeze(-1) + unit.view(1, 1, nu) * s_span.unsqueeze(-1)  # (B, ngrid, nu)
+        uu = (torch.cosh(s) - torch.cosh(rho).unsqueeze(-1)).clamp_min(0.0).sqrt()
         integ = s * torch.exp(-s * s / (2.0 * ts.unsqueeze(-1))) * 2.0 / torch.sinh(s).clamp_min(tiny)
         return torch.trapezoid(integ, uu, dim=-1)                  # (B, ngrid)
 
