@@ -574,9 +574,10 @@ NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy r
 
 # Insights and conclusions
 
-*Preliminary — written while the sweep was running (130 / 336 cells: the full seed-0
-grid plus the first replicates). Regenerate the tables with
-`python experiments/report.py init_refactor_3d`; this section is preserved.*
+*Sweep complete (336 / 336 cells + the 42-cell `c1e4_exp1.0` extension,
+2026-08-25). Regenerate the tables with `python experiments/report.py
+init_refactor_3d`; this section is preserved. (The "runs collected" header counts
+c1e4 against all four step counts, hence 378 / 504 — every cell that exists is in.)*
 
 - **The general-d ELBO holds at d = 3.** Bayes-optimal model, 32M samples:
   `wnelbo_ref = 0.50067 ± 0.00077` on naive_ps (H = 0.50029); φ-independent to
@@ -607,3 +608,10 @@ grid plus the first replicates). Regenerate the tables with
   step-groups there jump by ±0.05. Seeds 1–2 decorrelate it; for cross-cell
   comparisons at fixed seed, re-evaluate the saved `model.pt` on fresh draws or
   give the test pass its own seed.
+- **V = 10^4 (`c1e4_exp1.0`, H = 1.0407, 20k steps, 3 seeds):** CE-trained cells
+  are on H at every loss rate (1.0435–1.0470, vs 1.05–1.25 at d = 2 where the low
+  rates wander), `wce_ref` 0.93 vs 4.3–6.5 at d = 2. PP-trained cells improve
+  4–35× over d = 2 (1.054–1.111 vs 1.45–3.77) but at 20k steps still trail CE by
+  0.01–0.07 with `wce_ref` ≈ 40–60. The extra boundary dimension separates 10^4
+  words far better than the circle does.
+- Cross-dimension summary and figure: `experiments/init_refactor_16d/RESULTS.md`.
