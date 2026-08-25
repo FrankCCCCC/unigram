@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import hydra
@@ -18,7 +19,9 @@ class HyperbolicDLM(BaseTrainer):
         self.config = config
         self.bridge = HyperBridge()
 
-        self.model_input_dim = config.hyper_dim
+        # Model input z = (rho, u): the bridge radius plus its direction, a unit
+        # vector in R^hyper_dim (the boundary of H^hyper_dim is S^{hyper_dim-1}).
+        self.model_input_dim = config.hyper_dim + 1
         # If False the per-word boundary angles phi_v stay fixed at (v+0.5)*2*pi/V
         # instead of being read off the lm-head; the lm-head still trains as the
         # logit readout. See the word_embedding property.
@@ -93,12 +96,14 @@ class HyperbolicDLM(BaseTrainer):
                 ts=ts,
                 targets=targets,
                 vocab_size=vocab_size,
+                emb_dim=self.config.hyper_dim,
                 word_embedding=word_embedding,
             )
         else:
             raise ValueError(f"config.flow_path = {self.config.flow_path} is not supported, only suppport ({FlowPath.HYPERBOLIC_BOUNDARY}).")
 
-        z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
+        # rhos: (N,), thetas: (N, hyper_dim) unit directions -> z: (N, hyper_dim + 1)
+        z = torch.cat([rhos[:, None], thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
         return logits, ts, rhos, thetas, proposal_weight
 
@@ -219,6 +224,10 @@ def main(cfg: DictConfig) -> None:
 
     metrics_path = save_results(test_metrics, cfg.folder)
     print(f"Saved test metrics to: {metrics_path}")
+    if cfg.mode == "tnb":
+        # Final weights (a few KB): the lm_head rows are the learned boundary
+        # embedding, so a finished run can be re-evaluated and its phi inspected.
+        torch.save(model.model.state_dict(), os.path.join(cfg.folder, "model.pt"))
 
     task_mgr.finished()
 

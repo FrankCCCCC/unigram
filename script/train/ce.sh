@@ -6,7 +6,7 @@
 #
 # Knobs (env vars, all optional):
 #   OUTPUT_DIR  run directory (= hydra.run.dir, holds metrics + logs)
-#   PYTHON PS PROPOSAL EXP_RATE MAX_STEPS SEED LR TEST_SIZE PER_GPU_BS EXTRA
+#   PYTHON PS PROPOSAL EXP_RATE MAX_STEPS SEED LR TEST_SIZE PER_GPU_BS HYPER_DIM EXTRA
 #
 # The reference pass (which reports test_wnelbo_ref / test_ce_ref) uses its OWN
 # proposal, pinned to exp(0.1) by experiments/init_test/setup.md, INDEPENDENT of
@@ -30,6 +30,7 @@ SEED="${SEED:-1}"
 LR="${LR:-0.001}"
 TEST_SIZE="${TEST_SIZE:-4000000}"
 PER_GPU_BS="${PER_GPU_BS:-2048}"
+HYPER_DIM="${HYPER_DIM:-2}"
 OUTPUT_DIR="${OUTPUT_DIR:-output/init_test/ps-${PS}_lg-ce_q-${PROPOSAL}${EXP_RATE}_qref-${REF_PROPOSAL}${REF_RATE}_lr${LR}_st${MAX_STEPS}_s${SEED}}"
 EXTRA="${EXTRA:-}"
 
@@ -42,7 +43,7 @@ exec "${PYTHON}" -u main.py \
     test_size="${TEST_SIZE}" \
     batch_size="${PER_GPU_BS}" \
     seed="${SEED}" \
-    hyper_dim=2 \
+    hyper_dim="${HYPER_DIM}" \
     gradient_clip_val=1.0 \
     loss_proposal_type="${PROPOSAL}" \
     loss_proposal_exp_rate="${EXP_RATE}" \
