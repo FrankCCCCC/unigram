@@ -81,7 +81,7 @@ class HyperbolicDLM(BaseTrainer):
 
         # For calculating posterior
         # Case 1: The word embedding is Equally divided around the circle
-        # rhos, thetas = self.bridge.bridge(ts=ts)
+        # rhos, thetas = self.bridge.binary_bridge(ts=ts)
         # if self.rotate_emb:
         #     thetas = thetas + (
         #         targets.to(dtype=torch.float64) + 0.5
@@ -89,7 +89,7 @@ class HyperbolicDLM(BaseTrainer):
 
         # Case 2: The word embedding is learnable
         if self.config.flow_path == FlowPath.HYPERBOLIC_BOUNDARY:
-            rhos, thetas = self.bridge.bridge(
+            rhos, thetas = self.bridge.binary_bridge(
                 ts=ts,
                 targets=targets,
                 vocab_size=vocab_size,
@@ -120,7 +120,7 @@ class HyperbolicDLM(BaseTrainer):
             device=self.device,
             generator=loss_gen,
         )
-        wloss, loss = Loss.weighted_loss(
+        wloss, loss = Loss.weighted_binary_loss(
             logits=loss_logits,
             targets=targets,
             rhos=rhos_loss,
@@ -145,7 +145,7 @@ class HyperbolicDLM(BaseTrainer):
             device=self.device,
             generator=ref_gen,
         )
-        wnelbo_ref, nelbo_ref = Loss.weighted_loss(
+        wnelbo_ref, nelbo_ref = Loss.weighted_binary_loss(
             logits=logits_ref,
             targets=targets,
             rhos=rhos_ref,
@@ -154,7 +154,7 @@ class HyperbolicDLM(BaseTrainer):
             loss_geometry=LossGeometry.POINCARE_POLAR,
             word_embedding=self.word_embedding,
         )
-        wce_ref, ce_ref = Loss.weighted_loss(
+        wce_ref, ce_ref = Loss.weighted_binary_loss(
             logits=logits_ref,
             targets=targets,
             rhos=rhos_ref,
