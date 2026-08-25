@@ -1015,6 +1015,18 @@ class HyperbolicHeatKernel(GeoUtils):
         B = ts.shape[0]
         if B == 0:
             return ts.new_empty(0, seq_len)
+        rho, cdf = HyperbolicHeatKernel.radial_cdf(ts, d)
+        u = torch.rand(B, seq_len, dtype=ts.dtype, device=ts.device)
+        return HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u)
+
+    @staticmethod
+    def radial_cdf(ts: torch.FloatTensor, d: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """The radial marginal's CDF on its per-`t` grid: `(rho, cdf)`, both `(B, ngrid)`,
+        `rho` increasing per row and `cdf` running from 0 to 1. This is the expensive
+        half of `sample_radial` (for even `d` the McKean base is a `(B, ngrid, nu)`
+        quadrature); `_radial_inverse_cdf` is the cheap half.
+        """
+        B = ts.shape[0]
         tiny = torch.finfo(ts.dtype).tiny
         ng = HyperbolicHeatKernel._RADIAL_NGRID
         st = ts.sqrt().unsqueeze(-1)                               # (B,1)
@@ -1041,13 +1053,19 @@ class HyperbolicHeatKernel(GeoUtils):
         m = (sinh_rho ** (d - 1) * f).clamp_min(0.0)              # (B, ng)
         cdf = torch.cumulative_trapezoid(m, rho, dim=-1)          # (B, ng-1)
         cdf = torch.cat([torch.zeros(B, 1, dtype=ts.dtype, device=ts.device), cdf], dim=-1)
-        cdf = cdf / cdf[:, -1:].clamp_min(tiny)
-        u = torch.rand(B, seq_len, dtype=ts.dtype, device=ts.device)
-        idx = torch.searchsorted(cdf, u).clamp(1, ng - 1)         # (B, seq_len)
+        return rho, cdf / cdf[:, -1:].clamp_min(tiny)
+
+    @staticmethod
+    def _radial_inverse_cdf(rho: torch.Tensor, cdf: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        """Linear-interpolated inverse of `radial_cdf`'s `(rho, cdf)` at `u` of shape
+        `(B, k)`; returns `(B, k)`."""
+        tiny = torch.finfo(rho.dtype).tiny
+        ng = rho.shape[-1]
+        idx = torch.searchsorted(cdf, u).clamp(1, ng - 1)         # (B, k)
         c_lo = torch.gather(cdf, 1, idx - 1); c_hi = torch.gather(cdf, 1, idx)
         r_lo = torch.gather(rho, 1, idx - 1); r_hi = torch.gather(rho, 1, idx)
         w = ((u - c_lo) / (c_hi - c_lo).clamp_min(tiny)).clamp(0.0, 1.0)
-        return r_lo * (1.0 - w) + r_hi * w                        # (B, seq_len)
+        return r_lo * (1.0 - w) + r_hi * w                        # (B, k)
 
     @staticmethod
     def _free_direction(shape, d: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:

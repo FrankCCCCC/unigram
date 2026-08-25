@@ -304,6 +304,58 @@ class HyperBridge:
         s = (math.sqrt(b * b + 4.0 * half_a * c) - b) / (2.0 * half_a)
         return s * s
 
+    # Tabulated radial sampler for EVEN d. sample_radial seeds the even-d Millson
+    # recurrence from the McKean p_2 integral, a (B, ngrid, nu) float64 quadrature
+    # that costs ~3.3 s per 2048-sample call on a 2080 Ti -- ~700x the odd-d
+    # branch, ~7 s per training step. The radial law depends on t alone, so its
+    # quantile function is tabulated ONCE from sample_radial's own CDF on a log-t
+    # grid and read back by bilinear interpolation in (log t, u). Rows are kept in
+    # x = rho / sqrt(t), which tends to the chi_d quantiles as t -> 0 and so varies
+    # slowly in log t; below _RADIAL_TABLE_T_MIN the lookup is clamped (the
+    # x-quantiles are t-independent there to O(t)) while rho = x sqrt(t) still
+    # uses the actual t. Validated against sample_radial: see
+    # experiments/init_refactor_16d/EXPERIMENT.md.
+    _RADIAL_TABLE_T_MIN: float = 1e-12
+    _RADIAL_TABLE_PER_DECADE: int = 64
+    _RADIAL_TABLE_NU: int = 8192
+    _radial_tables: dict = {}   # (d, device) -> (log_t (n_t,), xq (n_t, nu))
+
+    @staticmethod
+    def _radial_quantile_table(d: int, device: torch.device):
+        key = (d, str(device))
+        if key not in HyperBridge._radial_tables:
+            t_min = HyperBridge._RADIAL_TABLE_T_MIN
+            t_max = HyperBridge._radial_t_max(d)
+            n_t = int(math.ceil(math.log10(t_max / t_min) * HyperBridge._RADIAL_TABLE_PER_DECADE)) + 1
+            log_t = torch.linspace(math.log(t_min), math.log(t_max), n_t, dtype=torch.float64, device=device)
+            nu = HyperBridge._RADIAL_TABLE_NU
+            u = torch.linspace(0.0, 1.0, nu, dtype=torch.float64, device=device)
+            rows = []
+            for i in range(0, n_t, 64):
+                ts = log_t[i:i + 64].exp()
+                rho, cdf = HyperbolicHeatKernel.radial_cdf(ts, d)
+                q = HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u.expand(ts.shape[0], nu).contiguous())
+                rows.append(q / ts.sqrt()[:, None])
+            HyperBridge._radial_tables[key] = (log_t, torch.cat(rows, dim=0))
+        return HyperBridge._radial_tables[key]
+
+    @staticmethod
+    def sample_radial_tabulated(ts: torch.Tensor, d: int) -> torch.Tensor:
+        log_t, xq = HyperBridge._radial_quantile_table(d, ts.device)
+        n_t, nu = xq.shape
+        u = torch.rand_like(ts)
+        pos_t = (ts.log().clamp(log_t[0], log_t[-1]) - log_t[0]) / (log_t[1] - log_t[0])
+        i0 = pos_t.floor().long().clamp(0, n_t - 2)
+        wt = (pos_t - i0).clamp(0.0, 1.0)
+        pos_u = u * (nu - 1)
+        j0 = pos_u.floor().long().clamp(0, nu - 2)
+        wu = (pos_u - j0).clamp(0.0, 1.0)
+        x = (
+            xq[i0, j0] * (1 - wt) * (1 - wu) + xq[i0, j0 + 1] * (1 - wt) * wu
+            + xq[i0 + 1, j0] * wt * (1 - wu) + xq[i0 + 1, j0 + 1] * wt * wu
+        )
+        return x * ts.sqrt()
+
     @staticmethod
     def bridge(
         ts,
@@ -325,7 +377,9 @@ class HyperBridge:
 
         binary_bridge is the d == 2 special case in closed form (Gruet) and is
         much cheaper; this path prices any d >= 2 through sample_radial's
-        numeric inverse-CDF.
+        numeric inverse-CDF -- directly for odd d, via the tabulated quantile
+        function (sample_radial_tabulated) for even d, whose McKean quadrature
+        is too slow to run per step.
 
         Returns `(rhos, us)`: shapes `(N,)` and `(N, d)`, both `ts.dtype`.
         """
@@ -339,7 +393,10 @@ class HyperBridge:
         # (exp(-2*(d-1)*rho) underflows past rho ~ 372/(d-1)), so every larger
         # t is indistinguishable.
         ts = ts.clamp_max(HyperBridge._radial_t_max(d))
-        rhos = HyperbolicHeatKernel.sample_radial(ts, d=d, seq_len=1).squeeze(-1)
+        if d % 2 == 0:
+            rhos = HyperBridge.sample_radial_tabulated(ts, d=d)
+        else:
+            rhos = HyperbolicHeatKernel.sample_radial(ts, d=d, seq_len=1).squeeze(-1)
         rhos = rhos.clamp_max(HyperBridge.RHO_MAX)
 
         # Spike direction on e_1
