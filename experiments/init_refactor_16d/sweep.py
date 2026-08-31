@@ -3,7 +3,7 @@
 
 Grid is exactly experiments/init_refactor_16d/setup.md:
 
-    ps                     {naive_ps, cmplx_ps}
+    ps                     {naive_ps, cmplx_ps, c1e3_exp1.0, c1e4_exp1.0}
     loss_proposal_type     {exp}
     loss_proposal_exp_rate {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
     loss_geometry          {cross_entropy, poincare_polar}
@@ -13,8 +13,15 @@ Grid is exactly experiments/init_refactor_16d/setup.md:
            test_size=4e6, batch_size=2048,
            ref_proposal_type=exp, ref_proposal_exp_rate=0.1
 
-2 x 7 x 2 x 4 x 3 = 336 runs, one SLURM job each. The three sibling projects
+4 x 7 x 2 x 4 x 3 = 672 runs, one SLURM job each. The three sibling projects
 init_refactor_{3,9,16}d are this file with PROJECT / HYPER_DIM changed.
+
+c1e3_exp1.0 / c1e4_exp1.0 are the same geometric law p_i ~ e^-i truncated at
+V = 1000 / 10000, so all four ps specs are compared against a known H(p). They
+are FAR more expensive than the V = 10 pair: the horosphere geometry
+materializes several (batch, V, d) float64 tensors, so a c1e4 cell costs 8-25x
+a naive_ps cell in time and up to 21 GiB of GPU memory. SEC_PER_STEP / PEAK_GB
+below carry the measured numbers and size each cell's time limit and node set.
 
 hyper_dim is the dimension d of H^d: the word embedding is (V, d), the bridge
 direction is a unit vector on S^{d-1}, and the model input is (rho, u) in
@@ -56,7 +63,7 @@ LOG_DIR = Path("experiments") / PROJECT / "logs"
 CONDA_BIN = "/home/sc3379/anaconda3/envs/sfm/bin"
 
 # --- grid (setup.md) -------------------------------------------------------
-PS_LIST = ["naive_ps", "cmplx_ps"]
+PS_LIST = ["naive_ps", "cmplx_ps", "c1e3_exp1.0", "c1e4_exp1.0"]
 PROPOSALS = ["exp"]
 EXP_RATES = ["0.01", "0.05", "0.1", "0.25", "0.5", "0.75", "1.0"]
 GEOMETRIES = {"ce": "script/train/ce.sh", "pp": "script/train/pp.sh"}
@@ -71,25 +78,66 @@ TEST_SIZE = 4_000_000
 BATCH_SIZE = 2048
 
 # --- slurm ----------------------------------------------------------------
-# Both owned partitions, all four nodes. desa-compute-01 (8x 2080 Ti, 11 GB) is
-# NOT excluded: Agent.md excludes it because 11 GB OOMs at seq 1024, which does
-# not apply to a 3x128 MLP over a 10-word vocab using well under 1 GB. This is
-# new science, not a reproduction, so there is no reason to pin a node.
+# Both owned partitions. Every cell is eligible for all four nodes; only the
+# ones whose measured peak memory does not fit a node's GPU are steered away
+# from it (see excluded_nodes), so desa-compute-01's 8x 2080 Ti stay in play for
+# everything they can hold. Agent.md excludes that node for seq-1024 work, which
+# does not apply to a 3x128 MLP.
 PARTITION = "thickstun,desa"
-CPUS_PER_TASK = 4
+# Measured, not guessed: finished cells report TotalCPU ~= Elapsed (13:25 elapsed vs
+# 13:18 CPU), i.e. ~1 core. The work is GPU-bound float64 tensor ops and the dataloader
+# runs in-process (num_workers=0), so 2 leaves 100% headroom. It matters because the
+# GPU-rich nodes are CPU-poor -- desa-compute-01 is 36 CPUs to 8 GPUs -- so a 4-CPU ask
+# strands GPUs whenever other jobs hold CPUs on the same node.
+CPUS_PER_TASK = 2
 MEM = "16G"
-# Per-cell wall-clock budget. Measured on the 2080 Ti pilot (the slowest node):
-# SEC_PER_STEP covers train + the per-step reference pass; TEST_SEC covers the
-# 4M-sample test pass. Both doubled for headroom -- an expired limit costs the
-# whole cell, a loose one costs nothing on an `infinite`-TIMELIMIT partition.
-SEC_PER_STEP = 0.05
-TEST_SEC = 300
+
+# Vocabulary size of each ps spec. The horosphere geometry materializes several
+# (batch, V, d) float64 tensors, so V*d drives both a cell's step time and its
+# peak GPU memory.
+VOCAB = {"naive_ps": 10, "cmplx_ps": 10, "c1e3_exp1.0": 1000, "c1e4_exp1.0": 10000}
+
+# Per-cell wall-clock budget, keyed by (vocabulary size, hyper_dim) and doubled
+# by time_limit() for headroom. SEC_PER_STEP covers train + the per-step reference
+# pass; TEST_SEC covers the 4M-sample test pass. V = 10 keeps the 2080 Ti pilot's
+# flat figures, so the finished naive_ps / cmplx_ps cells are budgeted exactly as
+# they were; V = 1000 / 10000 are measured at batch 2048 on an RTX A6000 and
+# rounded up ~25%.
+#
+# Keyed by d, not just V, because the scheduler is sched/backfill: a limit 7x the
+# real cost (what a single V-keyed worst-d row gives d = 3) almost never fits a
+# backfill window, so the cell waits for a full drain instead. Fairshare here
+# charges actual usage, not the request, so the only cost of a loose limit is
+# that lost backfill -- and the only cost of a tight one is losing the cell.
+SEC_PER_STEP = {(10, 3): 0.05, (10, 9): 0.05, (10, 16): 0.05,
+                (1000, 3): 0.035, (1000, 9): 0.07, (1000, 16): 0.08,
+                (10000, 3): 0.22, (10000, 9): 0.47, (10000, 16): 0.70}
+TEST_SEC = {10: 300, 1000: 300, 10000: 900}
+
+# Peak GPU memory of a training step, measured at batch 2048 on an RTX A6000.
+# Only the V = 10000 cells come close to a card's capacity; everything else fits
+# in under 2.5 GiB. Keyed by (vocab size, hyper_dim) because the (batch, V, d)
+# tensors scale with d as well.
+PEAK_GB = {(10000, 3): 5.1, (10000, 9): 12.4, (10000, 16): 20.9}
+PEAK_GB_DEFAULT = 2.5
+# Usable GPU memory per node, by the smallest card it offers.
+NODE_GPU_GB = {"desa-compute-01": 10.5, "kuleshov-compute-03": 24.0,
+               "kuleshov-compute-02": 48.0, "thickstun-compute-01": 48.0}
+# Headroom over the measured peak: fragmentation plus the CUDA context.
+GPU_MARGIN = 1.25
 
 
-def time_limit(steps: int) -> str:
-    secs = 2 * (steps * SEC_PER_STEP + TEST_SEC)
+def time_limit(ps: str, steps: int) -> str:
+    v = VOCAB[ps]
+    secs = 2 * (steps * SEC_PER_STEP[(v, HYPER_DIM)] + TEST_SEC[v])
     h, rem = divmod(int(secs), 3600)
     return f"{h:02d}:{rem // 60:02d}:00"
+
+
+def excluded_nodes(ps: str) -> str:
+    """Nodes whose GPU cannot hold this cell, comma-joined ('' if none)."""
+    need = PEAK_GB.get((VOCAB[ps], HYPER_DIM), PEAK_GB_DEFAULT) * GPU_MARGIN
+    return ",".join(n for n, gb in NODE_GPU_GB.items() if gb < need)
 
 
 # Scheduling priority. In SLURM a HIGHER --nice means LOWER priority, so the
@@ -101,12 +149,37 @@ def time_limit(steps: int) -> str:
 # "#SBATCH --nice   0" parses as --nice followed by a stray token, and sbatch
 # rejects it with "Invalid directive found in batch script: 0".
 PRIMARY_SEED = 0
-NICE_PRIMARY = 0
-NICE_REPLICATE = 50
+NICE_REPLICATE = 100
+# Within a seed the queue is ordered by cost, so a complete coarse picture lands
+# early and the expensive cells fill in behind it: small vocabulary before
+# large, short runs before long. Both terms stay well under NICE_REPLICATE, so
+# every seed-0 cell still outranks every replicate.
+NICE_BY_VOCAB = {10: 0, 1000: 10, 10000: 30}
+NICE_BY_STEPS = {20000: 0, 40000: 2, 100000: 5, 200000: 9}
+# A cell that does not fit every node must rank BELOW cells that do. SLURM's main
+# scheduler gate-keeps a partition on the highest-priority job it cannot place, so
+# a c1e4 cell waiting for a >=24 GB GPU sits at the head of the queue and strands
+# desa-compute-01's 8x 11 GB cards -- which can ONLY ever run the small cells.
+# Measured 2026-08-26: that left the node at 0/8 GPUs for hours with 780 cells
+# queued; re-ranking refilled it to 7/8 within 25 s. This term must exceed
+# NICE_REPLICATE **plus the vocab/steps spread** (100 + 39) so a fits-everywhere
+# REPLICATE still outranks an excluded PRIMARY seed -- ordering by cost alone is what
+# caused the stall, and a value of 90 (< NICE_REPLICATE) was not enough: it left
+# desa-compute-01 idle again once the capable seed-0 cells drained.
+# Scaled by HOW restricted the cell is, not just whether it is restricted: a cell that
+# fits three nodes must outrank one that fits only two, or the less portable cell
+# gate-keeps hardware it cannot use. Measured 2026-08-27: 16d c1e4 (>=48 GB, 2 nodes) and
+# 9d c1e4 (>=24 GB, 3 nodes) carried equal nice, and a 16d cell at the head stranded
+# kuleshov-compute-03's idle A5000s from the 9d cells that fit them.
+NICE_EXCLUDED = 150          # base penalty for not fitting every node
+NICE_PER_EXCLUDED_NODE = 30  # additional penalty per further excluded node
 
 
-def job_nice(seed: int) -> int:
-    return NICE_PRIMARY if seed == PRIMARY_SEED else NICE_REPLICATE
+def job_nice(ps: str, steps: int, seed: int) -> int:
+    return ((0 if seed == PRIMARY_SEED else NICE_REPLICATE)
+            + NICE_BY_VOCAB[VOCAB[ps]] + NICE_BY_STEPS[steps]
+            + (NICE_EXCLUDED + NICE_PER_EXCLUDED_NODE * (len(excl.split(",")) - 1)
+               if (excl := excluded_nodes(ps)) else 0))
 
 
 def run_name(ps: str, geom: str, proposal: str, rate: str, steps: int, seed: int) -> str:
@@ -208,13 +281,15 @@ def main() -> None:
             ntasks=1,
             cpus_per_task=CPUS_PER_TASK,
             mem=MEM,
-            time=time_limit(steps),
+            time=time_limit(ps, steps),
             output=str(LOG_DIR / f"{name}_%j.log"),
+            **({"exclude": excl} if (excl := excluded_nodes(ps)) else {}),
         )
-        sbatch_cmd = f"sbatch --nice={job_nice(seed)}"
+        sbatch_cmd = f"sbatch --nice={job_nice(ps, steps, seed)}"
         if first_body is None:
             first_body = (name, slurm, body, sbatch_cmd)
-        nice_counts[job_nice(seed)] = nice_counts.get(job_nice(seed), 0) + 1
+        nice = job_nice(ps, steps, seed)
+        nice_counts[nice] = nice_counts.get(nice, 0) + 1
         if not args.dry_run:
             # One rejected cell must not abandon the remaining hundreds.
             try:
@@ -229,15 +304,17 @@ def main() -> None:
     print(f"already finished  : {skipped_done}")
     print(f"already in squeue : {skipped_queued}")
     print(f"{'would submit' if args.dry_run else 'submitted'}      : {submitted}")
-    n_cols = len(args.ps) * len(args.geometries) * len(PROPOSALS) * len(args.rates) * len(args.seeds)
-    gpu_h = n_cols * sum(s * SEC_PER_STEP + TEST_SEC for s in args.steps) / 3600
-    print(f"estimated compute : ~{gpu_h:.0f} GPU-h at the pilot's 2080 Ti rate")
+    n_cols = len(args.geometries) * len(PROPOSALS) * len(args.rates) * len(args.seeds)
+    gpu_h = n_cols * sum(
+        s * SEC_PER_STEP[(VOCAB[p], HYPER_DIM)] + TEST_SEC[VOCAB[p]]
+        for p in args.ps for s in args.steps) / 3600
+    print(f"estimated compute : ~{gpu_h:.0f} GPU-h for the FULL grid at the budgeted rate")
     if failed:
         print(f"FAILED to submit    : {len(failed)}")
         for name, err in failed[:5]:
             print(f"    {name}\n      {err}")
     for nice in sorted(nice_counts):
-        tag = "seed 0 (runs first)" if nice == NICE_PRIMARY else "replicate seeds"
+        tag = "seed 0 (runs first)" if nice < NICE_REPLICATE else "replicate seeds"
         print(f"  nice={nice:<3} {nice_counts[nice]:>5} jobs   {tag}")
     print(f"runs   -> {OUT_ROOT}/")
     print(f"logs   -> {LOG_DIR}/")

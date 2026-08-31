@@ -1,8 +1,9 @@
 # init_refactor_3d results
 
-- runs collected: **378** / 504 (75%) — run dirs without test_metrics.json: 0
+- runs collected: **672** / 672 (100%) — run dirs without test_metrics.json: 0
 - H(naive_ps) = **0.5003** — wnelbo_ref is bounded below by this
 - H(cmplx_ps) = **1.6664** — wnelbo_ref is bounded below by this
+- H(c1e3_exp1.0) = **1.0407** — wnelbo_ref is bounded below by this
 - H(c1e4_exp1.0) = **1.0407** — wnelbo_ref is bounded below by this
 - `!` marks loss proposals above the ~0.304 variance cliff, where the
   weighted estimator has infinite variance. The reference pass is pinned at
@@ -255,6 +256,126 @@ Each cell: avg & std across seed
 
 ---
 
+## c1e3_exp1.0, Training Step 20000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 0.9355 ± 0.0249 | 1.0518 ± 0.0042 | 0.9362 ± 0.0218 | 0.0967 ± 0.0004 | 0.0843 ± 0.0019 |
+| exp0.05 | 0.9333 ± 0.0231 | 1.0509 ± 0.0055 | 0.9320 ± 0.0215 | 0.0967 ± 0.0004 | 0.0840 ± 0.0018 |
+| exp0.1 | 0.9272 ± 0.0138 | 1.0529 ± 0.0085 | 0.9273 ± 0.0164 | 0.0969 ± 0.0007 | 0.0836 ± 0.0014 |
+| exp0.25 | 0.9227 ± 0.0175 | 1.0468 ± 0.0051 | 0.9226 ± 0.0189 | 0.0963 ± 0.0005 | 0.0832 ± 0.0016 |
+| exp0.5 ! | 0.9173 ± 0.0111 | 1.0464 ± 0.0056 | 0.9184 ± 0.0136 | 0.0963 ± 0.0005 | 0.0828 ± 0.0012 |
+| exp0.75 ! | 1.0714 ± 0.2370 | 1.1003 ± 0.0931 | 1.0697 ± 0.2346 | 0.1011 ± 0.0085 | 0.0964 ± 0.0213 |
+| exp1.0 ! | 0.9178 ± 0.0126 | 1.0460 ± 0.0024 | 0.9246 ± 0.0122 | 0.0961 ± 0.0003 | 0.0830 ± 0.0011 |
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 1.0599 ± 0.0092 | 1.0646 ± 0.0048 | 24.9597 ± 10.3438 | 0.0912 ± 0.0080 | 1.9923 ± 0.8210 |
+| exp0.05 | 1.0504 ± 0.0080 | 1.0507 ± 0.0108 | 12.8708 ± 9.1441 | 0.0908 ± 0.0091 | 1.0313 ± 0.7350 |
+| exp0.1 | 1.0485 ± 0.0064 | 1.0499 ± 0.0073 | 13.3028 ± 9.6378 | 0.0906 ± 0.0089 | 1.0664 ± 0.7749 |
+| exp0.25 | 1.0463 ± 0.0069 | 1.0472 ± 0.0028 | 15.3086 ± 12.8425 | 0.0924 ± 0.0042 | 1.2554 ± 1.0356 |
+| exp0.5 ! | 1.0457 ± 0.0049 | 1.0497 ± 0.0029 | 11.9564 ± 8.8236 | 0.0909 ± 0.0080 | 0.9656 ± 0.7147 |
+| exp0.75 ! | 1.0516 ± 0.0038 | 1.0575 ± 0.0097 | 22.7980 ± 7.2823 | 0.0908 ± 0.0074 | 1.8537 ± 0.6576 |
+| exp1.0 ! | 1.0559 ± 0.0124 | 1.0637 ± 0.0080 | 20.9939 ± 8.6028 | 0.0907 ± 0.0080 | 1.7214 ± 0.7512 |
+
+---
+
+## c1e3_exp1.0, Training Step 40000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 0.9358 ± 0.0467 | 1.0530 ± 0.0193 | 0.9264 ± 0.0350 | 0.0969 ± 0.0016 | 0.0835 ± 0.0030 |
+| exp0.05 | 1.0706 ± 0.2517 | 1.1001 ± 0.1024 | 1.0637 ± 0.2423 | 0.1011 ± 0.0093 | 0.0960 ± 0.0220 |
+| exp0.1 | 0.9134 ± 0.0108 | 1.0405 ± 0.0004 | 0.9113 ± 0.0120 | 0.0958 ± 0.0001 | 0.0822 ± 0.0010 |
+| exp0.25 | 0.9238 ± 0.0141 | 1.0441 ± 0.0034 | 0.9236 ± 0.0140 | 0.0961 ± 0.0004 | 0.0832 ± 0.0012 |
+| exp0.5 ! | 0.9204 ± 0.0086 | 1.0433 ± 0.0028 | 0.9183 ± 0.0081 | 0.0960 ± 0.0003 | 0.0828 ± 0.0007 |
+| exp0.75 ! | 1.0594 ± 0.2335 | 1.0960 ± 0.0934 | 1.0562 ± 0.2268 | 0.1008 ± 0.0085 | 0.0953 ± 0.0206 |
+| exp1.0 ! | 0.9157 ± 0.0143 | 1.0463 ± 0.0067 | 0.9189 ± 0.0142 | 0.0962 ± 0.0005 | 0.0825 ± 0.0013 |
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 1.0692 ± 0.0079 | 1.0654 ± 0.0082 | 25.8645 ± 12.2549 | 0.0870 ± 0.0076 | 2.0859 ± 1.0094 |
+| exp0.05 | 1.0497 ± 0.0069 | 1.0488 ± 0.0058 | 12.0984 ± 9.1331 | 0.0915 ± 0.0063 | 0.9785 ± 0.7388 |
+| exp0.1 | 1.0509 ± 0.0102 | 1.0500 ± 0.0079 | 14.4076 ± 10.7590 | 0.0911 ± 0.0079 | 1.1425 ± 0.8519 |
+| exp0.25 | 1.0461 ± 0.0041 | 1.0451 ± 0.0048 | 13.6221 ± 8.1964 | 0.0898 ± 0.0070 | 1.1608 ± 0.7053 |
+| exp0.5 ! | 1.0470 ± 0.0020 | 1.0440 ± 0.0024 | 13.8394 ± 11.1547 | 0.0902 ± 0.0078 | 1.1006 ± 0.8879 |
+| exp0.75 ! | 1.0584 ± 0.0058 | 1.0558 ± 0.0058 | 19.3931 ± 5.6465 | 0.0876 ± 0.0134 | 1.5742 ± 0.4550 |
+| exp1.0 ! | 1.0571 ± 0.0138 | 1.0642 ± 0.0029 | 20.1237 ± 8.4284 | 0.0854 ± 0.0094 | 1.6632 ± 0.7403 |
+
+---
+
+## c1e3_exp1.0, Training Step 100000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 0.9131 ± 0.0049 | 1.0513 ± 0.0078 | 0.9161 ± 0.0055 | 0.0969 ± 0.0008 | 0.0827 ± 0.0005 |
+| exp0.05 | 0.9162 ± 0.0020 | 1.0433 ± 0.0019 | 0.9168 ± 0.0054 | 0.0961 ± 0.0002 | 0.0827 ± 0.0004 |
+| exp0.1 | 0.9179 ± 0.0108 | 1.0432 ± 0.0004 | 0.9168 ± 0.0111 | 0.0961 ± 0.0001 | 0.0827 ± 0.0009 |
+| exp0.25 | 0.9192 ± 0.0218 | 1.0434 ± 0.0018 | 0.9183 ± 0.0187 | 0.0961 ± 0.0003 | 0.0828 ± 0.0015 |
+| exp0.5 ! | 0.9183 ± 0.0080 | 1.0431 ± 0.0028 | 0.9186 ± 0.0068 | 0.0960 ± 0.0003 | 0.0828 ± 0.0005 |
+| exp0.75 ! | 0.9143 ± 0.0212 | 1.0428 ± 0.0016 | 0.9157 ± 0.0200 | 0.0960 ± 0.0003 | 0.0826 ± 0.0016 |
+| exp1.0 ! | 0.9089 ± 0.0164 | 1.0435 ± 0.0004 | 0.9119 ± 0.0130 | 0.0961 ± 0.0001 | 0.0822 ± 0.0010 |
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 1.0806 ± 0.0145 | 1.0772 ± 0.0075 | 16.7943 ± 8.1553 | 0.0841 ± 0.0061 | 1.3919 ± 0.6652 |
+| exp0.05 | 1.0490 ± 0.0049 | 1.0468 ± 0.0023 | 13.9649 ± 12.8456 | 0.0886 ± 0.0070 | 1.1191 ± 1.0105 |
+| exp0.1 | 1.0450 ± 0.0029 | 1.0437 ± 0.0064 | 15.8217 ± 12.8986 | 0.0875 ± 0.0125 | 1.2539 ± 1.0147 |
+| exp0.25 | 1.0413 ± 0.0041 | 1.0442 ± 0.0040 | 9.3763 ± 3.4549 | 0.0887 ± 0.0083 | 0.8162 ± 0.3375 |
+| exp0.5 ! | 1.0518 ± 0.0158 | 1.0515 ± 0.0153 | 18.8711 ± 14.7305 | 0.0826 ± 0.0113 | 1.4624 ± 1.1618 |
+| exp0.75 ! | 1.0594 ± 0.0292 | 1.0575 ± 0.0080 | 18.7588 ± 4.1047 | 0.0806 ± 0.0082 | 1.5171 ± 0.3382 |
+| exp1.0 ! | 1.0691 ± 0.0281 | 1.0580 ± 0.0114 | 17.6664 ± 10.9577 | 0.0772 ± 0.0108 | 1.4626 ± 0.9595 |
+
+---
+
+## c1e3_exp1.0, Training Step 200000
+
+Each cell: avg & std across seed
+
+**CE**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 0.9105 ± 0.0022 | 1.0459 ± 0.0037 | 0.9075 ± 0.0030 | 0.0964 ± 0.0003 | 0.0819 ± 0.0002 |
+| exp0.05 | 0.9145 ± 0.0154 | 1.0447 ± 0.0063 | 0.9136 ± 0.0134 | 0.0962 ± 0.0005 | 0.0824 ± 0.0011 |
+| exp0.1 | 0.9119 ± 0.0128 | 1.0418 ± 0.0025 | 0.9104 ± 0.0102 | 0.0960 ± 0.0003 | 0.0821 ± 0.0009 |
+| exp0.25 | 0.9179 ± 0.0214 | 1.0421 ± 0.0002 | 0.9164 ± 0.0197 | 0.0959 ± 0.0002 | 0.0826 ± 0.0016 |
+| exp0.5 ! | 0.9194 ± 0.0112 | 1.0463 ± 0.0027 | 0.9193 ± 0.0087 | 0.0963 ± 0.0003 | 0.0829 ± 0.0008 |
+| exp0.75 ! | 0.9156 ± 0.0251 | 1.0416 ± 0.0023 | 0.9144 ± 0.0192 | 0.0959 ± 0.0001 | 0.0825 ± 0.0016 |
+| exp1.0 ! | 0.9133 ± 0.0217 | 1.0693 ± 0.0469 | 0.9958 ± 0.1567 | 0.0964 ± 0.0006 | 0.0834 ± 0.0030 |
+
+**Polar ELBO**
+
+| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+|---|---|---|---|---|---|
+| exp0.01 | 1.0585 ± 0.0265 | 1.0540 ± 0.0216 | 7.4479 ± 4.6243 | 0.0826 ± 0.0086 | 0.6107 ± 0.3557 |
+| exp0.05 | 1.0494 ± 0.0028 | 1.0476 ± 0.0049 | 14.4845 ± 13.2162 | 0.0849 ± 0.0065 | 1.1605 ± 1.0399 |
+| exp0.1 | 1.0467 ± 0.0040 | 1.0467 ± 0.0026 | 14.6878 ± 15.2901 | 0.0902 ± 0.0055 | 1.1793 ± 1.1803 |
+| exp0.25 | 1.0443 ± 0.0026 | 1.0436 ± 0.0010 | 12.0665 ± 11.1517 | 0.0898 ± 0.0050 | 1.0517 ± 0.9994 |
+| exp0.5 ! | 1.0444 ± 0.0022 | 1.0449 ± 0.0021 | 16.5018 ± 16.8005 | 0.0837 ± 0.0138 | 1.3171 ± 1.3309 |
+| exp0.75 ! | 1.0415 ± 0.0197 | 1.0476 ± 0.0023 | 5.5020 ± 1.4411 | 0.0777 ± 0.0089 | 0.4471 ± 0.1413 |
+| exp1.0 ! | 1.0275 ± 0.0066 | 1.0493 ± 0.0072 | 8.7552 ± 3.9317 | 0.0786 ± 0.0121 | 0.7246 ± 0.3561 |
+
+---
+
 ## c1e4_exp1.0, Training Step 20000
 
 Each cell: avg & std across seed
@@ -293,25 +414,25 @@ Each cell: avg & std across seed
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 0.9451 ± 0.0125 | 1.0547 ± 0.0113 | 0.9416 ± 0.0029 | 0.0970 ± 0.0012 | 0.0848 ± 0.0002 |
+| exp0.05 | 0.9324 ± 0.0193 | 1.0489 ± 0.0128 | 0.9298 ± 0.0224 | 0.0965 ± 0.0011 | 0.0838 ± 0.0019 |
+| exp0.1 | 0.9283 ± 0.0176 | 1.0455 ± 0.0052 | 0.9265 ± 0.0178 | 0.0962 ± 0.0004 | 0.0835 ± 0.0015 |
+| exp0.25 | 0.9271 ± 0.0156 | 1.0418 ± 0.0042 | 0.9267 ± 0.0132 | 0.0958 ± 0.0005 | 0.0835 ± 0.0011 |
+| exp0.5 ! | 0.9332 ± 0.0123 | 1.0445 ± 0.0079 | 0.9310 ± 0.0135 | 0.0961 ± 0.0007 | 0.0838 ± 0.0011 |
+| exp0.75 ! | 0.9323 ± 0.0055 | 1.0417 ± 0.0067 | 0.9288 ± 0.0091 | 0.0958 ± 0.0007 | 0.0836 ± 0.0007 |
+| exp1.0 ! | 0.9283 ± 0.0113 | 1.0418 ± 0.0016 | 0.9271 ± 0.0163 | 0.0957 ± 0.0003 | 0.0834 ± 0.0013 |
 
 **Polar ELBO**
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 1.0871 ± 0.0241 | 1.0824 ± 0.0177 | 35.8463 ± 14.4500 | 0.0919 ± 0.0080 | 2.8217 ± 1.1492 |
+| exp0.05 | 1.0601 ± 0.0126 | 1.0584 ± 0.0129 | 45.4140 ± 25.7580 | 0.0938 ± 0.0037 | 3.4903 ± 1.9809 |
+| exp0.1 | 1.0531 ± 0.0095 | 1.0511 ± 0.0076 | 43.4527 ± 22.6791 | 0.0938 ± 0.0036 | 3.3651 ± 1.7176 |
+| exp0.25 | 1.0521 ± 0.0051 | 1.0483 ± 0.0085 | 41.7911 ± 16.7042 | 0.0922 ± 0.0060 | 3.3063 ± 1.3640 |
+| exp0.5 ! | 1.0591 ± 0.0193 | 1.0588 ± 0.0204 | 48.6781 ± 29.6098 | 0.0936 ± 0.0041 | 3.7070 ± 2.2027 |
+| exp0.75 ! | 1.0622 ± 0.0173 | 1.0638 ± 0.0130 | 43.5781 ± 23.5337 | 0.0911 ± 0.0078 | 3.4610 ± 1.9663 |
+| exp1.0 ! | 1.0440 ± 0.0320 | 1.0693 ± 0.0157 | 40.9226 ± 16.8884 | 0.0886 ± 0.0127 | 3.2194 ± 1.4364 |
 
 ---
 
@@ -323,25 +444,25 @@ Each cell: avg & std across seed
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 0.9132 ± 0.0192 | 1.0476 ± 0.0040 | 0.9146 ± 0.0080 | 0.0965 ± 0.0003 | 0.0826 ± 0.0007 |
+| exp0.05 | 0.9190 ± 0.0219 | 1.0422 ± 0.0032 | 0.9180 ± 0.0162 | 0.0959 ± 0.0003 | 0.0828 ± 0.0014 |
+| exp0.1 | 0.9160 ± 0.0219 | 1.0427 ± 0.0040 | 0.9154 ± 0.0186 | 0.0960 ± 0.0005 | 0.0826 ± 0.0015 |
+| exp0.25 | 0.9155 ± 0.0224 | 1.0421 ± 0.0038 | 0.9139 ± 0.0179 | 0.0960 ± 0.0004 | 0.0824 ± 0.0015 |
+| exp0.5 ! | 0.9190 ± 0.0211 | 1.0442 ± 0.0100 | 0.9166 ± 0.0179 | 0.0962 ± 0.0010 | 0.0827 ± 0.0015 |
+| exp0.75 ! | 0.9144 ± 0.0214 | 1.0411 ± 0.0026 | 0.9135 ± 0.0185 | 0.0959 ± 0.0003 | 0.0824 ± 0.0015 |
+| exp1.0 ! | 0.9158 ± 0.0167 | 1.0413 ± 0.0053 | 0.9157 ± 0.0135 | 0.0958 ± 0.0005 | 0.0825 ± 0.0011 |
 
 **Polar ELBO**
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 1.1336 ± 0.1150 | 1.1337 ± 0.1203 | 24.4577 ± 14.9737 | 0.0920 ± 0.0054 | 1.9049 ± 1.0976 |
+| exp0.05 | 1.0515 ± 0.0066 | 1.0539 ± 0.0070 | 24.5527 ± 3.3002 | 0.0904 ± 0.0069 | 1.9931 ± 0.3087 |
+| exp0.1 | 1.0480 ± 0.0037 | 1.0488 ± 0.0062 | 27.0872 ± 5.2717 | 0.0912 ± 0.0067 | 2.1965 ± 0.4655 |
+| exp0.25 | 1.0441 ± 0.0014 | 1.0438 ± 0.0032 | 29.3779 ± 6.1933 | 0.0908 ± 0.0050 | 2.3632 ± 0.5441 |
+| exp0.5 ! | 1.0531 ± 0.0065 | 1.0509 ± 0.0048 | 31.3061 ± 11.9725 | 0.0891 ± 0.0057 | 2.5318 ± 1.0499 |
+| exp0.75 ! | 1.0516 ± 0.0126 | 1.0518 ± 0.0111 | 26.6323 ± 15.2292 | 0.0843 ± 0.0091 | 2.1659 ± 1.2528 |
+| exp1.0 ! | 1.0385 ± 0.0096 | 1.0676 ± 0.0217 | 16.1261 ± 9.6799 | 0.0814 ± 0.0085 | 1.3129 ± 0.7858 |
 
 ---
 
@@ -353,25 +474,25 @@ Each cell: avg & std across seed
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 0.9075 ± 0.0023 | 1.0442 ± 0.0030 | 0.9068 ± 0.0031 | 0.0962 ± 0.0003 | 0.0819 ± 0.0003 |
+| exp0.05 | 0.9113 ± 0.0089 | 1.0468 ± 0.0101 | 0.9106 ± 0.0143 | 0.0965 ± 0.0009 | 0.0822 ± 0.0013 |
+| exp0.1 | 0.9116 ± 0.0094 | 1.0434 ± 0.0035 | 0.9108 ± 0.0107 | 0.0961 ± 0.0003 | 0.0822 ± 0.0009 |
+| exp0.25 | 0.9041 ± 0.0024 | 1.0421 ± 0.0035 | 0.9028 ± 0.0025 | 0.0961 ± 0.0003 | 0.0815 ± 0.0002 |
+| exp0.5 ! | 0.9150 ± 0.0214 | 1.0426 ± 0.0018 | 0.9150 ± 0.0196 | 0.0960 ± 0.0003 | 0.0825 ± 0.0016 |
+| exp0.75 ! | 0.9011 ± 0.0020 | 1.0419 ± 0.0033 | 0.9032 ± 0.0025 | 0.0960 ± 0.0003 | 0.0815 ± 0.0003 |
+| exp1.0 ! | 0.8999 ± 0.0010 | 1.0444 ± 0.0041 | 0.9066 ± 0.0046 | 0.0962 ± 0.0004 | 0.0818 ± 0.0004 |
 
 **Polar ELBO**
 
 | loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
 |---|---|---|---|---|---|
-| exp0.01 | - | - | - | - | - |
-| exp0.05 | - | - | - | - | - |
-| exp0.1 | - | - | - | - | - |
-| exp0.25 | - | - | - | - | - |
-| exp0.5 ! | - | - | - | - | - |
-| exp0.75 ! | - | - | - | - | - |
-| exp1.0 ! | - | - | - | - | - |
+| exp0.01 | 1.0520 ± 0.0124 | 1.0536 ± 0.0077 | 9.4241 ± 2.9529 | 0.0790 ± 0.0083 | 0.7933 ± 0.2776 |
+| exp0.05 | 1.0457 ± 0.0059 | 1.0479 ± 0.0026 | 22.4789 ± 10.6781 | 0.0887 ± 0.0065 | 1.8173 ± 0.7998 |
+| exp0.1 | 1.0486 ± 0.0029 | 1.0486 ± 0.0041 | 24.4153 ± 7.9935 | 0.0887 ± 0.0080 | 1.9659 ± 0.6110 |
+| exp0.25 | 1.0440 ± 0.0008 | 1.0444 ± 0.0024 | 19.6387 ± 12.4192 | 0.0887 ± 0.0056 | 1.5826 ± 0.9586 |
+| exp0.5 ! | 1.0484 ± 0.0053 | 1.0471 ± 0.0052 | 20.4906 ± 13.5917 | 0.0838 ± 0.0093 | 1.6687 ± 1.0761 |
+| exp0.75 ! | 1.0522 ± 0.0234 | 1.0550 ± 0.0068 | 17.5486 ± 12.4346 | 0.0806 ± 0.0077 | 1.4342 ± 0.9821 |
+| exp1.0 ! | 1.0250 ± 0.0103 | 1.0505 ± 0.0017 | 8.6689 ± 2.1415 | 0.0800 ± 0.0074 | 0.7230 ± 0.2035 |
 
 ---
 
@@ -507,6 +628,70 @@ NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy r
 
 ---
 
+## c1e3_exp1.0, Training Step 20000
+
+NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy respectively
+
+| Proposal | NELBO | CE |
+|---|---|---|
+| exp0.01 | 1.0599 ± 0.0092 | 0.9355 ± 0.0249 |
+| exp0.05 | 1.0504 ± 0.0080 | 0.9333 ± 0.0231 |
+| exp0.1 | 1.0485 ± 0.0064 | 0.9272 ± 0.0138 |
+| exp0.25 | 1.0463 ± 0.0069 | 0.9227 ± 0.0175 |
+| exp0.5 ! | 1.0457 ± 0.0049 | 0.9173 ± 0.0111 |
+| exp0.75 ! | 1.0516 ± 0.0038 | 1.0714 ± 0.2370 |
+| exp1.0 ! | 1.0559 ± 0.0124 | 0.9178 ± 0.0126 |
+
+---
+
+## c1e3_exp1.0, Training Step 40000
+
+NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy respectively
+
+| Proposal | NELBO | CE |
+|---|---|---|
+| exp0.01 | 1.0692 ± 0.0079 | 0.9358 ± 0.0467 |
+| exp0.05 | 1.0497 ± 0.0069 | 1.0706 ± 0.2517 |
+| exp0.1 | 1.0509 ± 0.0102 | 0.9134 ± 0.0108 |
+| exp0.25 | 1.0461 ± 0.0041 | 0.9238 ± 0.0141 |
+| exp0.5 ! | 1.0470 ± 0.0020 | 0.9204 ± 0.0086 |
+| exp0.75 ! | 1.0584 ± 0.0058 | 1.0594 ± 0.2335 |
+| exp1.0 ! | 1.0571 ± 0.0138 | 0.9157 ± 0.0143 |
+
+---
+
+## c1e3_exp1.0, Training Step 100000
+
+NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy respectively
+
+| Proposal | NELBO | CE |
+|---|---|---|
+| exp0.01 | 1.0806 ± 0.0145 | 0.9131 ± 0.0049 |
+| exp0.05 | 1.0490 ± 0.0049 | 0.9162 ± 0.0020 |
+| exp0.1 | 1.0450 ± 0.0029 | 0.9179 ± 0.0108 |
+| exp0.25 | 1.0413 ± 0.0041 | 0.9192 ± 0.0218 |
+| exp0.5 ! | 1.0518 ± 0.0158 | 0.9183 ± 0.0080 |
+| exp0.75 ! | 1.0594 ± 0.0292 | 0.9143 ± 0.0212 |
+| exp1.0 ! | 1.0691 ± 0.0281 | 0.9089 ± 0.0164 |
+
+---
+
+## c1e3_exp1.0, Training Step 200000
+
+NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy respectively
+
+| Proposal | NELBO | CE |
+|---|---|---|
+| exp0.01 | 1.0585 ± 0.0265 | 0.9105 ± 0.0022 |
+| exp0.05 | 1.0494 ± 0.0028 | 0.9145 ± 0.0154 |
+| exp0.1 | 1.0467 ± 0.0040 | 0.9119 ± 0.0128 |
+| exp0.25 | 1.0443 ± 0.0026 | 0.9179 ± 0.0214 |
+| exp0.5 ! | 1.0444 ± 0.0022 | 0.9194 ± 0.0112 |
+| exp0.75 ! | 1.0415 ± 0.0197 | 0.9156 ± 0.0251 |
+| exp1.0 ! | 1.0275 ± 0.0066 | 0.9133 ± 0.0217 |
+
+---
+
 ## c1e4_exp1.0, Training Step 20000
 
 NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy respectively
@@ -529,13 +714,13 @@ NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy r
 
 | Proposal | NELBO | CE |
 |---|---|---|
-| exp0.01 | - | - |
-| exp0.05 | - | - |
-| exp0.1 | - | - |
-| exp0.25 | - | - |
-| exp0.5 ! | - | - |
-| exp0.75 ! | - | - |
-| exp1.0 ! | - | - |
+| exp0.01 | 1.0871 ± 0.0241 | 0.9451 ± 0.0125 |
+| exp0.05 | 1.0601 ± 0.0126 | 0.9324 ± 0.0193 |
+| exp0.1 | 1.0531 ± 0.0095 | 0.9283 ± 0.0176 |
+| exp0.25 | 1.0521 ± 0.0051 | 0.9271 ± 0.0156 |
+| exp0.5 ! | 1.0591 ± 0.0193 | 0.9332 ± 0.0123 |
+| exp0.75 ! | 1.0622 ± 0.0173 | 0.9323 ± 0.0055 |
+| exp1.0 ! | 1.0440 ± 0.0320 | 0.9283 ± 0.0113 |
 
 ---
 
@@ -545,13 +730,13 @@ NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy r
 
 | Proposal | NELBO | CE |
 |---|---|---|
-| exp0.01 | - | - |
-| exp0.05 | - | - |
-| exp0.1 | - | - |
-| exp0.25 | - | - |
-| exp0.5 ! | - | - |
-| exp0.75 ! | - | - |
-| exp1.0 ! | - | - |
+| exp0.01 | 1.1336 ± 0.1150 | 0.9132 ± 0.0192 |
+| exp0.05 | 1.0515 ± 0.0066 | 0.9190 ± 0.0219 |
+| exp0.1 | 1.0480 ± 0.0037 | 0.9160 ± 0.0219 |
+| exp0.25 | 1.0441 ± 0.0014 | 0.9155 ± 0.0224 |
+| exp0.5 ! | 1.0531 ± 0.0065 | 0.9190 ± 0.0211 |
+| exp0.75 ! | 1.0516 ± 0.0126 | 0.9144 ± 0.0214 |
+| exp1.0 ! | 1.0385 ± 0.0096 | 0.9158 ± 0.0167 |
 
 ---
 
@@ -561,23 +746,27 @@ NELBO, CE are wloss while setting loss = polar_poincare_disk and cross_entropy r
 
 | Proposal | NELBO | CE |
 |---|---|---|
-| exp0.01 | - | - |
-| exp0.05 | - | - |
-| exp0.1 | - | - |
-| exp0.25 | - | - |
-| exp0.5 ! | - | - |
-| exp0.75 ! | - | - |
-| exp1.0 ! | - | - |
+| exp0.01 | 1.0520 ± 0.0124 | 0.9075 ± 0.0023 |
+| exp0.05 | 1.0457 ± 0.0059 | 0.9113 ± 0.0089 |
+| exp0.1 | 1.0486 ± 0.0029 | 0.9116 ± 0.0094 |
+| exp0.25 | 1.0440 ± 0.0008 | 0.9041 ± 0.0024 |
+| exp0.5 ! | 1.0484 ± 0.0053 | 0.9150 ± 0.0214 |
+| exp0.75 ! | 1.0522 ± 0.0234 | 0.9011 ± 0.0020 |
+| exp1.0 ! | 1.0250 ± 0.0103 | 0.8999 ± 0.0010 |
 
 
 ---
 
 # Insights and conclusions
 
-*Sweep complete (336 / 336 cells + the 42-cell `c1e4_exp1.0` extension,
-2026-08-25). Regenerate the tables with `python experiments/report.py
-init_refactor_3d`; this section is preserved. (The "runs collected" header counts
-c1e4 against all four step counts, hence 378 / 504 — every cell that exists is in.)*
+*Status 2026-08-25: the `naive_ps` / `cmplx_ps` half of the grid is **complete**
+(336 / 336 cells). `setup.md` now adds `c1e3_exp1.0` (V = 1000) and `c1e4_exp1.0`
+(V = 10000), taking each project to **672 cells**; those 294 further cells were
+submitted 2026-08-25 and land over the following days — the tables below show
+whatever has finished. Regenerate with `python experiments/report.py
+init_refactor_3d`; this section is preserved across regenerations. See
+`EXPERIMENT.md` for the measured cost of the new targets (~795 GPU-h for this
+project) and the Bayes-optimal pre-check that they sit on H = 1.0407.*
 
 - **The general-d ELBO holds at d = 3.** Bayes-optimal model, 32M samples:
   `wnelbo_ref = 0.50067 ± 0.00077` on naive_ps (H = 0.50029); φ-independent to
@@ -615,3 +804,96 @@ c1e4 against all four step counts, hence 378 / 504 — every cell that exists is
   0.01–0.07 with `wce_ref` ≈ 40–60. The extra boundary dimension separates 10^4
   words far better than the circle does.
 - Cross-dimension summary and figure: `experiments/init_refactor_16d/RESULTS.md`.
+
+---
+
+## `c1e3_exp1.0` (COMPLETE) — 504/504 cells, 2026-08-27
+
+**What the completed target establishes.** The full 3 `hyper_dim` × 2 geometries × 7 loss
+rates × 4 step counts × 3 seeds grid is present (168 `test_metrics.json` per dimension,
+none missing). `H(p) = 1.040652` analytically (V = 1000, `p_i ∝ e^-i`). The general-d
+bridge is sound at every dimension swept: **no leak anywhere** — 70/504 cells read below
+`H`, worst z = −2.15, none past −3 (against 51 cells past +5); aggregated to the 36
+shared-reference-draw `(d, steps, seed)` groups, exactly **one** group mean falls below
+`H`, by 0.00056 nats. What degrades with `d` is not the bound but our ability to *read*
+it: median per-cell `test_wnelbo_ref_std` runs 5.5 (d=3) → 21.0 (d=9) → 43–46 (d=16).
+
+| d | geom | best config | wnelbo_ref (3-seed mean ± sd) | margin | honest (LOSO) margin |
+|---|---|---|---|---|---|
+| 3 | ce | q=0.1, 40k | 1.04052 ± 0.00042 | −0.00013 | −0.00013 |
+| 3 | pp | q=0.25, 200k | 1.04363 ± 0.00101 | +0.00298 | +0.00776 |
+| 9 | ce | q=0.5, 100k | 1.03429 ± 0.00531 | −0.00636 | −0.00416 |
+| 9 | pp | q=1.0, 200k | 1.04004 ± 0.00933 | −0.00062 | +0.00892 |
+| 16 | ce | q=0.25, 200k | 1.06106 ± 0.04059 | +0.02041 | +0.04022 |
+| 16 | pp | q=0.1, 200k | 1.04313 ± 0.00811 | +0.00248 | +0.04324 |
+
+"margin" is an argmin over 28 configs, so it is selection-biased; LOSO (select on two
+seeds, read the third) is the honest number. Read that way: **d = 3 is solved**, d = 9 sits
+on `H` to ~±0.005, and **d = 16 is not solved** — LOSO buys nothing over the all-config
+mean (+0.0717 ce / +0.0363 pp) because the selection metric's own noise dominates.
+
+### The d = 16 / 100k spike is an ESTIMATOR DEFECT, not a model regression
+
+Measured: `test_wnelbo_ref_std` blows up exactly where the mean does (ce/100k median 92.4
+vs 43–46 elsewhere, max 1066.4; pp/100k max 1262.4), while **zero** of the 336 d=3/d=9
+cells show any such inflation. Across the 28 d=16 cells whose std exceeds 1.5× their
+(geometry, rate) baseline, a *single-outlier* model predicts each cell's excess from its
+std alone, `sqrt((s²−s₀²)/N)`, with corr 0.974 and median obs/pred 1.15 — i.e. **one test
+sample in 4 × 10⁶ carries the whole excess**. The models are fine: paired 100k−200k
+`test_nelbo_ref` (unweighted, thin-tailed) moves +0.0017 (ce) / +0.0005 (pp) while
+`wnelbo_ref` moves +0.121 / +0.068. For pp q=1.0/100k/s2, `test_wloss` on the same
+checkpoint reads 1.0459 ± 0.0032 against `wnelbo_ref` = 1.7993 ± 0.6312.
+
+**Root cause — verified in code.** `HyperBridge.bridge` clamps `t` at
+`_radial_t_max(d)` (`loss.py:395`), but that clamp is local: `Proposal.hyper_proposal`
+has already returned `proposal_weight` computed from the **unclamped** `t`, and `main.py`
+never re-derives it. So the integrand freezes at `t = _radial_t_max` while the reference
+weight keeps growing as `exp(0.1 t)/0.1`:
+
+| d | `_radial_t_max` | share of exp(0.1) draws clamped | weight at the tail |
+|---|---|---|---|
+| 3 | 96.96 | 0.006 % | negligible |
+| 9 | 5.64 | 57 % | moderate |
+| 16 | **1.51** | **86 %** | `t=276 → w = 9.7e12` |
+
+Without the clamp, `L(t)` decays exponentially and cancels the growing weight; with it, a
+convergent integral becomes divergent and a single draw can dominate. This also explains
+the previously-open d = 16 question — the Bayes-optimal reference reading +0.05 above `H`
+on cmplx_ps was attributed to a possible small-`t` bias in the tabulated even-d sampler;
+the clamp/weight mismatch is a simpler and sufficient explanation, and it predicts the
+observed severity ordering d=16 ≫ d=9 ≈ d=3.
+
+**Two things this is not.** (i) Not "the shared draw": the reference `t` is fixed by
+`(seed, max_steps)` with no geometry term, yet `(pp, s1, 100k)` carries a bit-identical
+draw and is clean — the shared draw is necessary, not sufficient. (ii) `ce q=0.01 / 100k`
+(1.2663 ± 0.1173) *is* a genuinely worse model on all three seeds — unweighted
+`10·nelbo_ref` = 1.2260 / 1.2880 / 1.1156 — part of a sweep-wide d=16 rate-0.01
+degradation (median `10·nelbo_ref` 1.117 at q=0.01 vs 1.046–1.059 elsewhere).
+
+### CE / ELBO decoupling by dimension
+
+Mean `test_wce_ref` for CE-trained cells collapses with `d` and is flat in steps:
+
+| d | 20k | 40k | 100k | 200k |
+|---|---|---|---|---|
+| 3 | 0.9473 | 0.9598 | 0.9163 | 0.9253 |
+| 9 | 0.0509 | 0.0511 | 0.0504 | 0.0515 |
+| 16 | 0.0150 | 0.0145 | 0.0162 | 0.0148 |
+
+The `(d−1)/2` drift identifies the word almost immediately at high `d`, so the denoising
+cross-entropy carries essentially no training signal there while the polar ELBO still sits
+measurably above `H`. Whether ce is *worse* than pp at d = 16 is **unsettled**: at the
+correct unit (9 shared-draw groups, 100k excluded) the gap is +0.0231 ± 0.0110, t = 2.10,
+p = 0.069, with 2/9 groups opposite-signed.
+
+### Guidance
+
+Until the reference proposal is truncated at `_radial_t_max` (or the weight is recomputed
+from the clamped `t`), **do not quote 3-seed means at d = 16** — report medians or trimmed
+means with the per-cell std, since the nominal SE (`std/2000`) understates seed-to-seed
+spread by 3–6×. Taking medians instead of means removes the pp/100k anomaly entirely
+(r0.75: 1.2182 → 1.0574; r1.0: 1.2979 → 1.0580) and leaves the pp 100k column
+indistinguishable from 20k/40k/200k.
+
+**Not yet known.** `c1e4_exp1.0` (V = 10⁴) is ~26 % done and lopsided (115/168 at d=3,
+14/168 at d=9, 1/168 at d=16), so no vocabulary-scaling claim at d ≥ 9 is available yet.

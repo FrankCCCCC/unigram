@@ -81,3 +81,94 @@ jobs and other users' work) that is ~1.5–2 days per project; faster as GPUs fr
 - `python experiments/report.py init_refactor_9d` → `RESULTS.md`.
 - Cross-dimension comparison: the same command for `_9d` / `_16d`, plus
   `experiments/init_test/RESULTS.md` for d = 2.
+
+## Grid extension (2026-08-25): `c1e3_exp1.0` and `c1e4_exp1.0`
+
+`setup.md` now lists four `ps` specs. The two new ones are the same geometric law
+`p_i ∝ e^-i` truncated at `V = 1000` / `10000`, so both share one analytic entropy,
+`H = 1.040652` nats (`-log(1-q) + q/(1-q)`, `q = e^-1`) — the same `>= H(p)` check
+applies to them as to `naive_ps` / `cmplx_ps`. They extend the grid from 336 to
+**672 cells** (4 × 7 × 2 × 4 × 3); the full `max_steps` and `seed` axes are swept,
+not just the 20000-step slice the earlier c1e4 extension covered.
+
+### Why they are expensive
+
+`HyperBridge.horosphere_geometry` and `bridge_loss_poincare_disk_polar` materialize
+several `(batch, V, d)` float64 tensors, so both step time and peak GPU memory scale
+with `V·d`. Measured at `batch=2048` on an RTX A6000, `hyper_dim = 9`:
+
+| `ps` | V | train s/step | test s/batch | peak train GiB |
+|---|---|---|---|---|
+| `naive_ps` / `cmplx_ps` | 10 | ~0.022 | ~0.013 | 0.4 |
+| `c1e3_exp1.0` | 1 000 | 0.054 | 0.0366 | 1.2 |
+| `c1e4_exp1.0` | 10 000 | 0.376 | 0.2106 | 12.3 |
+
+### GPU allocation
+
+Both owned partitions stay in play (`--partition=thickstun,desa`). Only cells whose
+measured peak exceeds a node's GPU are steered off it, per `sweep.excluded_nodes`
+(measured peak × 1.25 for fragmentation and the CUDA context):
+
+- `naive_ps`, `cmplx_ps`, `c1e3_exp1.0` — all four nodes.
+- `c1e4_exp1.0` at `hyper_dim = 9` — excluded: `desa-compute-01` (11 GB).
+
+This exclusion is not theoretical: a `mode=opt` `c1e4` × `d = 16` validation run
+died with `torch.OutOfMemoryError` on a 2080 Ti at the `ws` allocation in
+`bridge_loss_poincare_disk_polar` (2.44 GiB requested, 1.36 GiB free).
+
+Per-cell `--time` is now keyed by vocabulary size (`SEC_PER_STEP` / `TEST_SEC`),
+doubled for headroom; `--nice` orders the queue by cost within a seed (small V and
+short runs first), so a complete coarse picture lands before the expensive cells.
+
+### Wall clock (expected)
+
+At the measured rate, per project: **~229 GPU-h** for `c1e3_exp1.0` and
+**~1598 GPU-h** for `c1e4_exp1.0`
+— **~1827 GPU-h** for this project, ~5300 GPU-h across the three
+siblings. That is ~220 GPU-days: the sweep is idempotent and resumable, so it fills
+in over days rather than completing in one sitting.
+
+### Pre-check (Bayes-optimal, `mode=opt`, 4M test samples)
+
+The general-d bridge remains a valid ELBO at these vocabulary sizes — all readings
+sit on `H(p)` within noise (the importance-weighted estimator's std grows with `d`,
+so the standard error does too):
+
+| run | `wnelbo_ref` | SE | `(x - H)/SE` |
+|---|---|---|---|
+| `c1e3` / `c1e4`, d = 3 | 1.0415 | 0.0027 | +0.31 |
+| `c1e3` / `c1e4`, d = 9 | 1.0379 | 0.0094 | −0.30 |
+| `c1e3` / `c1e4`, d = 16 | 1.0725 | 0.0202 | +1.58 |
+
+`c1e3` and `c1e4` agree to ~15 significant figures at a given `d`
+(`wnelbo_ref` byte-identical; `ce_ref` differs in the last ulp). Verified:
+
+- Both runs really do use the distinct vocabularies — the `c1e3` log prints 1001
+  `log_ps` entries, the `c1e4` log elides a 10000-entry tensor.
+- The boundary tables are **not** shared: `uniform_sphere_points(1000, d)` differs
+  from `uniform_sphere_points(10000, d)[:1000]` at `d = 3` (max|diff| 1.57) and
+  `d = 9` (1.27). Only at `d = 16` do they coincide exactly. So an earlier
+  "shared prefix" explanation for this is **wrong** and has been retracted.
+
+**Resolved 2026-08-25.** The Bayes-optimal Girsanov integrand is
+configuration-independent to float64 precision. Holding `ts`, `targets` and the RNG
+fixed (so `rho` and the spike direction in the `e_1` frame are identical) and varying
+only the boundary table, the per-sample losses agree to **1e-14 absolute**:
+
+| d | ρ draws identical | max abs diff | mean (V=1000) | mean (V=10000) |
+|---|---|---|---|---|
+| 3 | yes | 2.7e-15 | 0.333634 | 0.333634 |
+| 9 | yes | 3.6e-14 | 0.422465 | 0.422465 |
+| 16 | yes | 2.8e-14 | 0.232466 | 0.232466 |
+
+(Max *relative* diff looks large — up to 3.9 at d = 16 — but only on entries whose own
+value is ~1e-15; against a mean of 0.23 the absolute agreement is what matters.)
+
+Combined with identical RNG streams (same `seed`; `mode=opt` skips `trainer.fit` so the
+global RNG never advances; same `test_size` / `batch_size`; `counts_from_ps` gives the
+same counts for the only tokens that ever appear, `i <~ 15`), the two runs estimate the
+same integrand on the same draws — hence agreement to ~15 significant figures.
+
+**Practical consequence: the c1e3 and c1e4 Bayes-optimal checks are ONE validation of
+the general-d bridge, not two independent ones.** Do not quote them as mutual
+corroboration.
