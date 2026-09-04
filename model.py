@@ -1,8 +1,11 @@
 import math
-from typing import Optional, Union
+from abc import ABC, abstractmethod
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+
+from geo_bridge import GeoUtils
 
 class SmallMLP(nn.Module):
     """Tiny time-conditioned MLP that predicts a hyperbolic endpoint."""
@@ -41,6 +44,595 @@ class SmallMLP(nn.Module):
         if t.ndim == 1:
             t = t[:, None]
         return self.net(torch.cat([z, t], dim=-1))
+
+class HyperbolicModelBase(nn.Module, ABC):
+    """Shared readout for models whose state lives on a product of Poincare balls.
+
+    The manifold is `H^{d_1}_{K_1} x ... x H^{d_m}_{K_m}` and the state is the
+    `Coordinate.HYPERBOLIC_POLAR` output of
+    `HyperbolicHeatKernel.poincare_bridge_prod`: one radial coordinate per factor
+    (`radius`, last axis `m`) plus the per-factor unit boundary directions
+    concatenated (`theta`, last axis `sum(d_i) == embedding_size`). Both lists
+    `None` means the single factor `[embedding_size]` at `[-1.0]`, i.e. plain
+    `H^d` -- the same default `poincare_bridge_prod` uses.
+
+    Subclasses supply the trunk (`model_forward`), the boundary table
+    (`word_embedding`), and three attributes this class reads: `lm_head`
+    (the trunk-features -> vocabulary readout), `output_radial_dim` (how many
+    trailing trunk channels are the predicted radius rather than features),
+    `vocab_size`, and the factor spec `prod_factor_dim` /
+    `prod_factor_gaussian_curvature` the horosphere readout defaults to.
+
+    Two readouts, differing only in who adds the geometry:
+      naive       -- returns `lm_head`'s logits untouched. Per Invariant 1 those
+                     are a RESIDUAL, so the consumer must add
+                     `horosphere_geometry` itself (this is what `loss.py` does).
+      horosphere  -- adds `horosphere_geometry` here, so the returned logits are
+                     already the full log-posterior and must NOT be corrected a
+                     second time.
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+
+    @property
+    @abstractmethod
+    def word_embedding(self) -> torch.Tensor:
+        pass
+
+    @staticmethod
+    def prod_factors(
+        prod_factor_dim: Optional[Union[int, List[int]]],
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]],
+        embedding_size: int,
+    ):
+        """
+        Resolve and validate the product-factor split of a boundary of dimension
+        `embedding_size`.
+
+        Returns:
+            `tuple[List[int], List[float]]`: the per-factor dimensions `d_i >= 2`
+                (summing to `embedding_size`) and curvatures `K_i < 0`.
+        """
+        dims = prod_factor_dim
+        curvatures = prod_factor_gaussian_curvature
+        if dims is None and curvatures is None:
+            return [embedding_size], [-1.0]
+        if not (isinstance(dims, list) and isinstance(curvatures, list)):
+            raise TypeError(
+                "prod_factor_dim and prod_factor_gaussian_curvature must both be "
+                f"lists or both be None; got {type(dims)} and {type(curvatures)}."
+            )
+        if len(dims) != len(curvatures):
+            raise ValueError(
+                f"prod_factor_dim {dims} and prod_factor_gaussian_curvature "
+                f"{curvatures} must have the same length."
+            )
+        if sum(dims) != embedding_size:
+            raise ValueError(
+                f"prod_factor_dim {dims} should sum to the embedding size {embedding_size}."
+            )
+        for factor_dim, factor_curvature in zip(dims, curvatures):
+            if factor_dim < 2:
+                raise ValueError(f"Each product factor needs dim >= 2, not {factor_dim}.")
+            if factor_curvature >= 0.0:
+                raise ValueError(f"Hyperbolic curvature should be negative, not {factor_curvature}.")
+        return dims, curvatures
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        theta: torch.Tensor,
+        radius: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+        forward_type: str = "naive",
+        return_radial: bool=False,
+        prod_factor_dim: Optional[Union[int, List[int]]] = None,
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
+    ) -> Tuple[torch.Tensor]:
+        """
+        Predict vocabulary logits from a time-conditioned state.
+
+        Args:
+            z (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in Cartesian coordinate
+            theta (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in polar coordinate, angles
+            radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
+                Input state in polar coordinate, radius, consider product manifold
+            t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
+                Per-example time values, optional
+            forward_type (`str`, *optional*, defaults to `"naive"`):
+                `"naive"` for the residual logits, `"horosphere"` for the
+                geometry-corrected ones.
+            return_radial (`bool`, *optional*, defaults to `False`):
+                Also return the trunk's radial prediction.
+            prod_factor_dim (`Union[int, List[int]]`, *optional*):
+                Product-factor split, `"horosphere"` only. Both `None` falls
+                back to the model's own factors.
+            prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
+                Curvature `K_i < 0` of each factor.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
+                Vocabulary logits.
+            `torch.Tensor` of shape `(batch_size, max_seq_len, output_radial_dim)`:
+                if return_radial, the predicted radius
+        """
+        if forward_type == "naive":
+            return self.forward_naive(
+                z=z,
+                theta=theta,
+                radius=radius,
+                t=t,
+                return_radial=return_radial,
+            )
+        elif forward_type == "horosphere":
+            return self.forward_horosphere(
+                z=z,
+                theta=theta,
+                radius=radius,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+                t=t,
+                return_radial=return_radial,
+            )
+        else:
+            raise ValueError(f"forward_type, {forward_type}, is not supported.")
+
+    @abstractmethod
+    def model_forward(
+        self,
+        z: torch.Tensor,
+        t: torch.Tensor,
+    ):
+        pass
+
+    def forward_naive(
+        self,
+        z: torch.Tensor,
+        theta: torch.Tensor,
+        radius: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+        return_radial: bool=False
+    ) -> Tuple[torch.Tensor]:
+        """
+        Predict vocabulary logits from a time-conditioned state.
+
+        The state comes in ONE of the two coordinate systems: either Cartesian
+        `z`, or polar `(theta, radius)` -- concatenated on the last axis, so the
+        trunk sees `input_theta_dim + input_radius_dim` channels.
+
+        Args:
+            z (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in Cartesian coordinate
+            theta (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in polar coordinate, angles
+            radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
+                Input state in polar coordinate, radius, consider product manifold
+            t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
+                Per-example time values, optional
+            return_radial (`bool`, *optional*, defaults to `False`):
+                Also return the trunk's radial prediction.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
+                Vocabulary logits.
+            `torch.Tensor` of shape `(batch_size, max_seq_len, output_radial_dim)`:
+                if return_radial, the predicted radius
+        """
+        if z is not None and (theta is not None or radius is not None):
+            raise ValueError(
+                "Pass the state either as Cartesian z or as polar (theta, radius), not both."
+            )
+        if z is None and (theta is None or radius is None):
+            raise ValueError(
+                "The polar state needs BOTH theta and radius; got "
+                f"theta={type(theta)}, radius={type(radius)}."
+            )
+
+        input = None
+        if z is not None:
+            input = z
+        else:
+            input = torch.cat([theta, radius], dim=-1)
+
+        output = self.model_forward(z=input, t=t)
+        # The trunk emits the boundary features first and the radial channels
+        # last; splitting by a positive index (rather than -output_radial_dim)
+        # keeps output_radial_dim == 0 -- a model that predicts no radius -- from
+        # slicing the features away entirely.
+        split = output.shape[-1] - self.output_radial_dim
+        if return_radial:
+            return self.lm_head(output[..., :split]), output[..., split:]
+        return self.lm_head(output[..., :split])
+
+    @staticmethod
+    def radius_conversion(
+        radius: torch.Tensor,
+        prod_factor_dim: Union[int, List[int]],
+        prod_factor_gaussian_curvature: Union[float, List[float]],
+    ):
+        """
+        Convert to radius on Poincare disk, consider product manifold
+
+        Factor `i` has model radius `R_i = 1/sqrt(|K_i|)` and its intrinsic
+        (geodesic) radial coordinate maps to the ball radius
+        `R_i tanh(rho_i / 2 R_i)` -- the radial part of
+        `GeoUtils.hyperbolic_polar_to_poincare_cartesian`, so the result is
+        bounded by that factor's own ball radius. Scalar arguments describe the
+        single-factor case.
+
+        Args:
+            radius (`torch.Tensor` of shape `(..., num_factors)`):
+                Intrinsic radial coordinate of each product factor.
+            prod_factor_dim (`int` or `List[int]`):
+                Dimension of each factor. Only its length is used here; the
+                conversion depends on the curvature alone.
+            prod_factor_gaussian_curvature (`float` or `List[float]`):
+                Curvature `K_i < 0` of each factor.
+
+        Returns:
+            `torch.Tensor` of shape `(..., num_factors)`:
+                Poincare-ball radius of each factor.
+        """
+        if isinstance(prod_factor_dim, list) != isinstance(prod_factor_gaussian_curvature, list):
+            raise TypeError(
+                "prod_factor_dim and prod_factor_gaussian_curvature must both be "
+                f"lists or both be scalars; got {type(prod_factor_dim)} and "
+                f"{type(prod_factor_gaussian_curvature)}."
+            )
+        if not isinstance(prod_factor_dim, list):
+            prod_factor_dim = [prod_factor_dim]
+            prod_factor_gaussian_curvature = [prod_factor_gaussian_curvature]
+        assert len(prod_factor_dim) == len(prod_factor_gaussian_curvature), (
+            f"prod_factor_dim {prod_factor_dim} and prod_factor_gaussian_curvature "
+            f"{prod_factor_gaussian_curvature} must have the same length."
+        )
+        assert radius.shape[-1] == len(prod_factor_dim), (
+            f"radius must carry one radial coordinate per product factor "
+            f"({len(prod_factor_dim)}); got {radius.shape[-1]}."
+        )
+        model_radius = radius.new_tensor(
+            [GeoUtils._curvature_scale(k) for k in prod_factor_gaussian_curvature]
+        )
+        return model_radius * torch.tanh(radius / (2.0 * model_radius))
+
+    def horosphere_geometry(
+        self,
+        theta: torch.Tensor,
+        radius: torch.Tensor,
+        prod_factor_dim: Optional[Union[int, List[int]]] = None,
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
+    ):
+        """
+        Horocycle distance (Poisson kernel) for each word embedding.
+
+        `horosphere_dists[..., v] = sum_i -(d_i - 1) B^i_v(z_i)` -- `B^i_v` the
+        Busemann function of word `v`'s boundary point in factor `i`. It is the
+        log density of the bridge direction at word `v`, up to a `v`-independent
+        constant, so `softmax(horosphere_dists + log p)` is exactly the Bayes
+        posterior `q(y | z_t)`; the factors are independent Brownian motions, so
+        their Busemann terms simply add. This is the product-manifold form of
+        `HyperBridge.horosphere_geometry`, and every consumer of the naive logits
+        must treat them as a RESIDUAL on top of this term.
+
+        The half-angle form is the load-bearing one (Invariant 5):
+        `cosh s - sinh s <u, phi_v> = e^{+s} sin^2(a_v/2) + e^{-s} cos^2(a_v/2)`,
+        with `s = rho_i / R_i` the DIMENSIONLESS radial -- curvature enters only
+        here, exactly as in `HyperbolicHeatKernel._angular_boost`. Pulling
+        `e^{+s}` out of the log makes it overflow-free, the squared-difference
+        forms are cancellation-free, and `clamp_min` keeps the log finite once
+        both terms underflow (`s > ~372`, where `sin_half_sq` is exactly 0 for
+        the target word). Computed in float64 per Invariant 3.
+
+        Args:
+            theta (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
+                Intrinsic radial coordinate of each product factor.
+            prod_factor_dim (`Union[int, List[int]]`, *optional*):
+                Dimension of each factor. Both lists `None` means the single
+                factor `[embedding_size]` at `[-1.0]`.
+            prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
+                Curvature `K_i < 0` of each factor.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
+                Horosphere (Busemann) log-densities, float64.
+        """
+        embedding = self.word_embedding
+        if embedding is None:
+            # Same word -> direction map the bridge falls back to when no table
+            # is given, so the two stay consistent (HyperBridge._vocab_angles).
+            embedding = uniform_sphere_points(
+                self.vocab_size, theta.shape[-1], device=theta.device, dtype=torch.float64
+            )
+        embedding = embedding.to(torch.float64)
+        dims, curvatures = self.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding.shape[-1],
+        )
+        if theta.shape[-1] != embedding.shape[-1]:
+            raise ValueError(
+                f"theta must carry one direction per factor, {embedding.shape[-1]} "
+                f"channels in total; got {theta.shape[-1]}."
+            )
+        if radius.shape[-1] != len(dims):
+            raise ValueError(
+                f"radius must carry one radial coordinate per product factor "
+                f"({len(dims)}); got {radius.shape[-1]}."
+            )
+        theta = theta.to(torch.float64)
+        radius = radius.to(torch.float64)
+        tiny = torch.finfo(torch.float64).tiny
+
+        horosphere_dists, offset = 0.0, 0
+        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
+            # us: (..., 1, d_i) against phis: (V, d_i) -> (..., V, d_i)
+            us = theta[..., offset:offset + factor_dim].unsqueeze(-2)
+            phis = embedding[:, offset:offset + factor_dim]
+            offset += factor_dim
+            phis = phis / phis.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
+            #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
+            #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
+            sin_half_sq = (us - phis).square().sum(-1) / 4
+            cos_half_sq = (us + phis).square().sum(-1) / 4
+            ss = (radius[..., i] / GeoUtils._curvature_scale(factor_curvature)).unsqueeze(-1)
+            horosphere_dists = horosphere_dists - (factor_dim - 1) * (
+                ss + (
+                    sin_half_sq + cos_half_sq * (-2.0 * ss).exp()
+                ).clamp_min(tiny).log()
+            )
+        return horosphere_dists
+
+    def forward_horosphere(
+        self,
+        z: torch.Tensor,
+        theta: torch.Tensor,
+        radius: torch.Tensor,
+        prod_factor_dim: Optional[Union[int, List[int]]] = None,
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
+        t: Optional[torch.Tensor] = None,
+        return_radial: bool=False
+    ) -> Tuple[torch.Tensor]:
+        """
+        Predict vocabulary logits from a time-conditioned state.
+
+        The returned logits ALREADY carry the horosphere geometry, i.e. they are
+        the log-posterior up to a word-independent constant: `softmax` over them
+        is the model's posterior over words. Unlike `forward_naive`'s residual
+        logits they must not be corrected a second time (Invariant 1).
+
+        Args:
+            z (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in Cartesian coordinate
+            theta (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in polar coordinate, angles
+            radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
+                Input state in polar coordinate, radius on Poincare disk model, consider product manifold
+            prod_factor_dim (`Union[int, List[int]]`, *optional*):
+                Dimension of each factor. Both `None` falls back to the model's
+                own `prod_factor_dim` / `prod_factor_gaussian_curvature`.
+            prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
+                Curvature `K_i < 0` of each factor.
+            t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
+                Per-example time values, optional
+            return_radial (`bool`, *optional*, defaults to `False`):
+                Also return the trunk's radial prediction.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
+                Vocabulary logits, float64.
+            `torch.Tensor` of shape `(batch_size, max_seq_len, output_radial_dim)`:
+                if return_radial, the predicted radius
+        """
+        if theta is None or radius is None:
+            raise ValueError(
+                "The horosphere readout needs the polar state (theta, radius) to "
+                "evaluate the Busemann terms."
+            )
+        pred_radius = None
+        if return_radial:
+            pred_logit, pred_radius = self.forward_naive(
+                z=z, theta=theta, radius=radius, t=t, return_radial=True
+            )
+        else:
+            pred_logit = self.forward_naive(
+                z=z, theta=theta, radius=radius, t=t, return_radial=False
+            )
+        if prod_factor_dim is None and prod_factor_gaussian_curvature is None:
+            prod_factor_dim = self.prod_factor_dim
+            prod_factor_gaussian_curvature = self.prod_factor_gaussian_curvature
+        horo_dist = self.horosphere_geometry(
+            theta=theta,
+            radius=radius,
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+        )
+        pred_logit = pred_logit.to(horo_dist.dtype) + horo_dist
+
+        if return_radial:
+            return pred_logit, pred_radius
+        return pred_logit
+
+class MLPLMRefactor(HyperbolicModelBase):
+    """`SmallMLP` backbone reading a product-manifold state.
+
+    The sequence is flattened into one vector (as `MLPNLM` does), and the trunk
+    emits `output_theta_dim` boundary features -- read out to vocabulary logits
+    by `lm_head`, whose rows ARE the word embedding -- followed by
+    `output_radial_dim` radial channels. `input_theta_dim`, `output_theta_dim`
+    and `embedding_size` all name the boundary dimension `sum(prod_factor_dim)`,
+    and `input_radial_dim` is the number of product factors.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        input_theta_dim: int,
+        input_radial_dim: int,
+        output_theta_dim: int,
+        output_radial_dim: int,
+        embedding_size: int,
+        hidden_size: int,
+        depth: int,
+        max_seq_len: int=1,
+        unif_word_embedding: bool = False,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        if not (input_theta_dim == output_theta_dim == embedding_size):
+            raise ValueError(
+                "input_theta_dim, output_theta_dim and embedding_size all name the "
+                f"boundary dimension and must agree; got {input_theta_dim}, "
+                f"{output_theta_dim}, {embedding_size}."
+            )
+        dims, _ = self.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        if input_radial_dim != len(dims):
+            raise ValueError(
+                f"input_radial_dim must be one radial coordinate per product factor "
+                f"({len(dims)}); got {input_radial_dim}."
+            )
+        self.mlp = SmallMLP(
+            # +1: SmallMLP concatenates the scalar time onto its input.
+            input_dim=(input_theta_dim + input_radial_dim) * max_seq_len + 1,
+            hidden_size=hidden_size,
+            depth=depth,
+            output_dim=(output_theta_dim + output_radial_dim) * max_seq_len,
+        )
+
+        self.vocab_size: int = vocab_size
+        self.input_theta_dim: int = input_theta_dim
+        self.input_radial_dim: int = input_radial_dim
+        self.output_theta_dim: int = output_theta_dim
+        self.output_radial_dim: int = output_radial_dim
+        self.embedding_size: int = embedding_size
+        self.hidden_size: int = hidden_size
+        self.depth: int = depth
+        self.max_seq_len: int = max_seq_len
+        self.unif_word_embedding: bool = unif_word_embedding
+        self.prod_factor_dim: Optional[Union[int, List[int]]] = prod_factor_dim
+        self.prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = prod_factor_gaussian_curvature
+
+        self.lm_head = nn.Linear(embedding_size, vocab_size, bias=False)
+        if unif_word_embedding:
+            # lm_head.weight IS the word embedding the bridge and loss read: each
+            # row's direction is that word's boundary angle phi_v = atan2(e_v)
+            # (see HyperbolicDLM.word_embedding / HyperBridge._binary_vocab_angles).
+            # nn.Linear's default kaiming-uniform init leaves those angles badly
+            # clustered, so spread them evenly instead.
+            with torch.no_grad():
+                self.lm_head.weight.copy_(
+                    uniform_sphere_points(vocab_size, embedding_size).to(self.lm_head.weight.dtype)
+                )
+
+    @property
+    def word_embedding(self) -> torch.Tensor:
+        # The lm_head weight IS the boundary embedding: row v is word v's
+        # direction, so the shape contract is (vocab_size, output_dim) -- the
+        # (V, 2) that _binary_vocab_angles / the polar losses assert.
+        return self.lm_head.weight
+
+    def model_forward(
+        self,
+        z: torch.Tensor,
+        t: torch.Tensor,
+    ):
+        """
+        Flatten the sequence, run the trunk, restore the sequence axis.
+
+        Args:
+            z (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim + input_radial_dim)`):
+                Input state in the coordinates `forward_naive` assembled.
+            t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
+                Per-example time values.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, output_theta_dim + output_radial_dim)`:
+                Boundary features followed by the radial channels.
+        """
+        if t is None:
+            raise ValueError("MLPLMRefactor is time-conditioned; t is required.")
+        if z.ndim != 3 or z.shape[1] != self.max_seq_len:
+            raise ValueError(
+                f"z must have shape (batch_size, {self.max_seq_len}, channels); "
+                f"got {tuple(z.shape)}."
+            )
+        # The state is float64 (Invariant 3) while the trunk is float32, so the
+        # cast happens here, at the boundary between the geometry and the model.
+        dtype = self.lm_head.weight.dtype
+        output = self.mlp(z=z.flatten(1).to(dtype), t=t.to(dtype))
+        return output.reshape(z.shape[0], self.max_seq_len, -1)
+
+class OptimalModelRefactor(HyperbolicModelBase):
+    """Bayes-optimal unigram model on a product of Poincare balls.
+
+    Forward returns log-prior logits broadcast over the batch — these are the
+    optimal logits for the bridge losses, since
+    `softmax(horosphere_dists + log_ps)` recovers the true posterior
+    q(y | x_t) ∝ p(y) · prod_i (Poisson kernel)_i. Nothing is trained, so the
+    trunk is a constant and `lm_head` is the identity; with `word_embedding`
+    None the horosphere readout falls back to the same fixed boundary table the
+    bridge uses.
+    """
+
+    def __init__(
+        self,
+        ps,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        ps = torch.as_tensor(ps, dtype=torch.float64)
+        self.register_buffer("log_ps", (ps / ps.sum()).log())
+        self.vocab_size: int = self.log_ps.numel()
+        # forward_naive's contract: the trunk output IS the logit vector (no
+        # projection) and no trailing channel is a predicted radius.
+        self.lm_head = nn.Identity()
+        self.output_radial_dim: int = 0
+        self.prod_factor_dim: Optional[Union[int, List[int]]] = prod_factor_dim
+        self.prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = prod_factor_gaussian_curvature
+        print(f"self.ps: {self.log_ps.exp()}")
+        print(f"self.log_ps: {self.log_ps}")
+
+    @property
+    def word_embedding(self) -> Optional[torch.Tensor]:
+        return None
+
+    def model_forward(
+        self,
+        z: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Evaluate the Bayes-optimal logits.
+
+        Only `z`'s leading shape is used; the coordinates themselves are ignored
+        because the optimal logits are just `log p(y)` (the per-`x_t` Poisson
+        kernel is supplied by `horosphere_geometry`, or by the loss).
+
+        Args:
+            z (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
+                Input state in Cartesian coordinate
+            t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
+                Time values. Ignored.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
+                Log-prior logits, broadcast to match the leading batch shape.
+        """
+        del t
+        leading_shape = z.shape[:-1]
+        return self.log_ps.to(dtype=torch.float32).expand(*leading_shape, -1)
 
 class MLPLM(nn.Module):
     def __init__(
