@@ -4,8 +4,8 @@ from typing import List, Optional
 
 import torch
 
-from geo_bridge import HyperbolicHeatKernel
-from model import uniform_sphere_points
+from geo_bridge import GeoUtils, HyperbolicHeatKernel
+from model import HyperbolicModelBase, uniform_sphere_points
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
@@ -622,11 +622,129 @@ class Loss:
     Loss of arbitary dimension Poincare Disk, Polar
     """
     @staticmethod
-    def bridge_loss_elbo_refactor(logits, targets, rhos, thetas, word_embedding=None):
+    def bridge_loss_elbo_refactor(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding=None,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Angular path-KL of the bridge on a product of Poincare balls.
+
+        Conditioning the physical-time path-KL on the radius turns the angular
+        Girsanov integrand of factor m of
+        `H^{d_1}_{K_1} x ... x H^{d_M}_{K_M}` into a weighted endpoint
+        regression (slides/aug26_2026, "Hyperbolic Product Manifold"):
+
+            (d_m - 1)^2 kappa_m^2 || P_m (x_m - xhat_m) ||^2 / (2 D_m^2),
+
+        with `kappa_m = sqrt(-K_m)`, `u_m = kappa_m rho_m` the DIMENSIONLESS
+        radius, `P_m = I - theta_m theta_m^T` the tangent projector at the
+        bridge direction, `x_m` the target word's unit boundary direction in
+        factor m, `xhat_m = sum_v p_theta(v) ebar_{v,m}` the posterior mean of
+        the same, and `D_m = cosh(u_m) - sinh(u_m) <x_m, theta_m>`. The factors
+        are independent Brownian motions, so their terms add.
+
+        `logits` are the model's log-posterior over words -- the horosphere
+        readout is already applied (`HyperbolicModelBase.forward_horosphere`),
+        so `p_theta` is their plain softmax and horosphere_dists must NOT be
+        added a second time (Invariant 1).
+
+        Two things this is NOT. It is the ANGULAR path-KL only: the radial drift
+        term is dropped, so it is strictly smaller than
+        `bridge_loss_poincare_disk_polar`, whose `w_v` carries the radial
+        component as well -- the two are not comparable, and `H(p)` is not a
+        floor for this one. And the learned drift shares the TARGET's
+        denominator `D_m`, which is what collapses the drift error to a
+        regression on the endpoint.
+
+        Args:
+            logits (`torch.Tensor` of shape `(N, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(N,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(N, M)` or `(N,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(N, d)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, d)`, *optional*):
+                Boundary table; `None` falls back to the fixed one the bridge
+                uses (`HyperBridge._vocab_angles`).
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension of each factor. Both lists `None` means the single
+                factor `[d]` at `[-1.0]`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_m < 0` of each factor.
+
+        Returns:
+            `torch.Tensor` of shape `(N,)`: per-sample loss, float64.
         """
-        TODO: Implement hyperbolic bridge ELBO, based on polar coordinate
-        """
-        
+        (N,) = targets.shape
+        (N, V) = logits.shape
+        d = thetas.shape[-1]
+        assert(thetas.shape == (N, d))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, d)
+        if rhos.ndim == 1:
+            rhos = rhos[:, None]
+        dims, curvatures = HyperbolicModelBase.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=d,
+        )
+        assert(rhos.shape == (N, len(dims)))
+
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V,
+            emb_dim=d,
+            device=thetas.device,
+            dtype=torch.float64,
+            word_embedding=word_embedding,
+        )
+        probs = logits.to(torch.float64).softmax(-1)
+        tiny = torch.finfo(torch.float64).tiny
+
+        loss, offset = 0.0, 0
+        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
+            theta_m = thetas[:, offset:offset + factor_dim]
+            # Each factor has its own boundary sphere S^{d_m - 1}, so the table
+            # is normalized per block -- the same slicing poincare_bridge_prod
+            # samples with.
+            phis_m = phis[:, offset:offset + factor_dim]
+            offset += factor_dim
+            phis_m = phis_m / phis_m.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
+            x_m = phis_m[targets]                                  # (N, d_m)
+            xhat_m = probs @ phis_m                                # (N, d_m)
+            # P_m v = v - <theta_m, v> theta_m, without ever forming (d_m, d_m).
+            diffs = x_m - xhat_m
+            # (I - \Theta \Theta^{\top}) (x - \hat{x}) = (x - \hat{x}) - \Theta \Theta^{\top} (x - \hat{x}) 
+            # = (x - \hat{x}) - \Theta (\Theta^{\top} (x - \hat{x})), since the inner product (\Theta^{\top} (x - \hat{x})) is a scalar, order is not important
+            # = (x - \hat{x}) - (\Theta^{\top} (x - \hat{x})) \Theta
+            perps = diffs - (theta_m * diffs).sum(-1, keepdim=True) * theta_m
+
+            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
+            # u, not rho, is what drives cosh/sinh, so u is the quantity RHO_MAX
+            # caps (Invariant 4): both overflow float64 past u ~ 710. By then
+            # the direction already identifies the target to full precision, so
+            # the cap is statistically a no-op as before.
+            us = (kappa * rhos[:, i]).clamp_max(HyperBridge.RHO_MAX)
+            # alpha_t = <x_m, theta_m> and D_x = cosh(u) - sinh(u) alpha_t,
+            # the definition as written in the slides. NOTE: cosh and sinh agree
+            # to all 53 bits well before u ~ 20, so for a theta that has landed
+            # on its target word this evaluates to exactly 0 and the 1/D_x^2
+            # weight below is inf.
+            alphas = (x_m * theta_m).sum(-1)
+            D_x = us.cosh() - us.sinh() * alphas
+            # Square the RATIO, not numerator and denominator apart: ||perp||
+            # is bounded by 2 while D reaches e^-350, so ||perp||^2 / D^2
+            # overflows float64 where (||perp|| / D)^2 does not.
+            ratios = perps.norm(dim=-1, p=2) / D_x
+            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * ratios.square() / 2
+        return loss
 
     """
     Loss of arbitary dimension Poincare Disk, Cross Entropy
