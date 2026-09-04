@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -566,7 +566,7 @@ class Loss:
         return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
 
     """
-    Loss of arbitary dimension Poincare Disk
+    Loss of arbitary dimension Poincare Disk, Cross Entropy
     """
     @staticmethod
     def bridge_loss_crossentropy(logits, targets, rhos, thetas, word_embedding=None):
@@ -608,6 +608,52 @@ class Loss:
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
             bridge = Loss.bridge_loss_crossentropy(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+            )
+        else:
+            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
+        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
+
+    """
+    Loss of arbitary dimension Poincare Disk, Polar
+    """
+    @staticmethod
+    def bridge_loss_elbo_refactor(logits, targets, rhos, thetas, word_embedding=None):
+        """
+        TODO: Implement hyperbolic bridge ELBO, based on polar coordinate
+        """
+        
+
+    """
+    Loss of arbitary dimension Poincare Disk, Cross Entropy
+    """
+    @staticmethod
+    def bridge_loss_crossentropy_refactor(logits, targets, rhos, thetas, word_embedding=None):
+        """
+        Denoising cross-entropy of the model's OWN predictive distribution.
+        """
+        return torch.nn.functional.cross_entropy(
+            logits.to(torch.float64),
+            targets,
+            reduction='none',
+        )
+
+    @staticmethod
+    def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            bridge = Loss.bridge_loss_elbo_refactor(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+            )
+        elif loss_geometry == LossGeometry.CROSS_ENTROPY:
+            bridge = Loss.bridge_loss_crossentropy_refactor(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,

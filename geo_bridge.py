@@ -984,7 +984,7 @@ class HyperbolicHeatKernel(GeoUtils):
         return torch.trapezoid(integ, uu, dim=-1)                  # (B, ngrid)
 
     @staticmethod
-    def sample_radial(ts: torch.FloatTensor, d: int, seq_len: int) -> torch.FloatTensor:
+    def sample_radial(ts: torch.FloatTensor, d: int, seq_len: int, gaussian_curvature: float=-1.0) -> torch.FloatTensor:
         """Sample `seq_len` radial coordinates per heat time from the `H^d` heat-kernel
         marginal `pi(rho) ∝ sinh^{d-1}(rho) p_H(rho; t)` (generator `½ Δ`).
 
@@ -1009,7 +1009,10 @@ class HyperbolicHeatKernel(GeoUtils):
             (`t = O(1)`) comfortably; the cartesian paths refuse `rho > 20` regardless,
             so only very-large-`t` POLAR output is affected (would need a log-space
             marginal). See `unigram/notes/hyperbolic_heat_kernel_dd_derivation.md`.
+
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         if d < 2:
             raise ValueError(f"HyperbolicHeatKernel requires d >= 2; got d={d}")
         B = ts.shape[0]
@@ -1105,6 +1108,7 @@ class HyperbolicHeatKernel(GeoUtils):
         ts: torch.FloatTensor,
         seq_len: int,
         embedding_size: int,
+        gaussian_curvature: float = -1.0,
     ):
         r"""Sample `(rhos, u)` from the free hyperbolic heat kernel on `H^d`.
 
@@ -1120,7 +1124,9 @@ class HyperbolicHeatKernel(GeoUtils):
         Returns:
             tuple `(rhos, u)`: `rhos` of shape `(batch_size, seq_len)` (`>= 0`), `u` of
             shape `(batch_size, seq_len, embedding_size)` (`||u|| == 1`, uniform on `S^{d-1}`).
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         d = embedding_size
         rhos = HyperbolicHeatKernel.sample_radial(ts, d, seq_len)
         u = HyperbolicHeatKernel._free_direction(rhos.shape, d, ts.dtype, ts.device)
@@ -1132,6 +1138,7 @@ class HyperbolicHeatKernel(GeoUtils):
         seq_len: int,
         embedding_size: int,
         output_coord: Optional[str] = None,
+        gaussian_curvature: float = -1.0,
     ):
         r"""Sample from the free `H^d` heat kernel in Poincare-ball form.
 
@@ -1146,7 +1153,9 @@ class HyperbolicHeatKernel(GeoUtils):
             HYPERBOLIC_POLAR: tuple `(rhos, u)`, shapes `(batch_size, seq_len)` and
             `(batch_size, seq_len, embedding_size)`. CARTESIAN: Poincare-ball point of
             shape `(batch_size, seq_len, embedding_size)` with `||z|| < 1`.
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         rhos, u = HyperbolicHeatKernel.free_hyperbolic_heat_kernel(ts, seq_len, embedding_size)
         if output_coord == Coordinate.CARTESIAN:
             return GeoUtils.hyperbolic_polar_to_poincare_cartesian(rhos, u)
@@ -1158,6 +1167,7 @@ class HyperbolicHeatKernel(GeoUtils):
         seq_len: int,
         embedding_size: int,
         output_coord: Optional[str] = None,
+        gaussian_curvature: float = -1.0,
     ):
         """Sample from the free `H^d` heat kernel in Lorentz-Cartesian form.
 
@@ -1175,7 +1185,9 @@ class HyperbolicHeatKernel(GeoUtils):
             `(batch_size, seq_len, embedding_size)`. CARTESIAN: `torch.FloatTensor` of
             shape `(batch_size, seq_len, embedding_size + 1)`. Raises `ValueError` if
             `max(rho) > _LORENTZ_RHO_MAX`.
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         rhos, u = HyperbolicHeatKernel.free_poincare_heat_kernel(
             ts, seq_len, embedding_size, output_coord=Coordinate.HYPERBOLIC_POLAR
         )
@@ -1190,6 +1202,7 @@ class HyperbolicHeatKernel(GeoUtils):
         targets: torch.LongTensor,
         word_embedding: torch.FloatTensor,
         output_coord: Optional[str] = None,
+        gaussian_curvature: float = -1.0,
     ):
         """Sample the `H^d` bridge endpoint conditioned on a target embedding.
 
@@ -1214,10 +1227,13 @@ class HyperbolicHeatKernel(GeoUtils):
                 `S^{d-1}` concentrated toward the target).
             CARTESIAN: Poincare-ball coordinates of shape
                 `(batch_size, seq_len, embedding_size)`.
+
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         d = word_embedding.shape[-1]
         seq_len = targets.shape[-1]
-        rhos = HyperbolicHeatKernel.sample_radial(ts, d, seq_len)
+        rhos = HyperbolicHeatKernel.sample_radial(ts, d, seq_len, gaussian_curvature)
         u = HyperbolicHeatKernel._angular_boost(rhos, d)
         x = word_embedding[targets].to(ts.dtype)
         x = x / x.norm(dim=-1, keepdim=True).clamp_min(torch.finfo(ts.dtype).tiny)
@@ -1232,6 +1248,7 @@ class HyperbolicHeatKernel(GeoUtils):
         targets: torch.LongTensor,
         word_embedding: torch.FloatTensor,
         output_coord: Optional[str] = None,
+        gaussian_curvature: float = -1.0,
     ):
         """Lorentz-form `H^d` bridge endpoint conditioned on a target embedding.
 
@@ -1253,14 +1270,66 @@ class HyperbolicHeatKernel(GeoUtils):
             CARTESIAN: Lorentz-Cartesian coords of shape
                 `(batch_size, seq_len, embedding_size + 1)`. Raises `ValueError` if
                 `max(rho) > _LORENTZ_RHO_MAX`.
+        TODO: Consider gaussian_curvature arguement
         """
+        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         rhos, u = HyperbolicHeatKernel.poincare_bridge(
-            ts, targets, word_embedding, output_coord=Coordinate.HYPERBOLIC_POLAR
+            ts, targets, word_embedding, output_coord=Coordinate.HYPERBOLIC_POLAR, gaussian_curvature=gaussian_curvature,
         )
         if output_coord == Coordinate.HYPERBOLIC_POLAR:
             return rhos, u
         GeoUtils._check_lorentz_rho_bound(rhos, d=word_embedding.shape[-1], ts=ts)
         return GeoUtils.hyperbolic_polar_to_lorentz_cartesian(rhos, u)
+
+    @staticmethod
+    def poincare_bridge_prod(
+        ts: torch.FloatTensor,
+        targets: torch.LongTensor,
+        word_embedding: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[int]] = None,
+    ):
+        """Sample the `H^d` bridge endpoint conditioned on a target embedding.
+
+        Draws the radial coordinate from the heat-kernel marginal and the direction
+        from the Poisson kernel `(cosh rho - sinh rho <x,u>)^{-(d-1)}` (a Lorentz boost
+        centred at `e_1`), then Householder-reflects `e_1` to the normalized target
+        direction `x = word_embedding[targets]`, so the sample concentrates around `x`.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len)`):
+                Vocabulary indices into `word_embedding`.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, embedding_size)`):
+                Word-embedding table; `d = embedding_size` sets the hyperbolic dimension.
+            output_coord (`str`, *optional*, defaults to `Coordinate.HYPERBOLIC_POLAR`):
+                `Coordinate.HYPERBOLIC_POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            HYPERBOLIC_POLAR: tuple `(rhos, u)`, shapes `(batch_size, seq_len)` and
+                `(batch_size, seq_len, embedding_size)` (`u` a unit direction on
+                `S^{d-1}` concentrated toward the target).
+            CARTESIAN: Poincare-ball coordinates of shape
+                `(batch_size, seq_len, embedding_size)`.
+
+        TODO: Consider prod_factor_dim and prod_factor_gaussian_curvature arguement
+        """
+        if isinstance(prod_factor_curv, list) and isinstance(prod_factor_curv, list):
+            assert len(prod_factor_curv) == len(prod_factor_dim)
+        elif prod_factor_dim is None and prod_factor_curv is None:
+            prod_factor_curv = [-1.0]
+            prod_factor_dim = [emb_dim]
+        else:
+            raise TypeError(f"")
+        
+        for factor_dim, factor_curv in zip(prod_factor_dim, prod_factor_curv):
+            assert factor_curv < 0.0, f"Hyperbolic curvature should be negative"
+
+        if output_coord == Coordinate.CARTESIAN:
+            return GeoUtils.hyperbolic_polar_to_poincare_cartesian(rhos, u)
+        return rhos, u
 
     @staticmethod
     def geodesic(
