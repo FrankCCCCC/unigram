@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import hydra
 import lightning as L
@@ -7,55 +7,106 @@ import torch
 from omegaconf import DictConfig
 
 from dataset import UnigramDataModule, process_ps
+from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
 from loss import FlowPath, HyperBridge, Loss, LossGeometry, Proposal
-from model import MLPLM, OptimalModel
+from model import MLPLMRefactor, OptimalModelRefactor
 from utils import TaskMgr, save_results
 from visualizer import DataMgr
 from trainer import BaseTrainer
 
-class HyperbolicDLM(BaseTrainer):
+def resolve_prod_factors(config: DictConfig) -> Tuple[List[int], List[float]]:
+    """Read the geometry off the config as plain python lists.
+
+    `prod_factor_dim` / `prod_factor_gaussian_curvature` describe the product
+    manifold `H^{d_1}_{K_1} x ... x H^{d_M}_{K_M}`; both null falls back to the
+    single factor `[hyper_dim]` at `[gaussian_curvature]`. The conversion out of
+    omegaconf is not cosmetic: `HyperbolicModelBase.prod_factors` dispatches on
+    `isinstance(x, list)`, and a `ListConfig` is not a `list`.
+    """
+    dims = config.get("prod_factor_dim", None)
+    curvatures = config.get("prod_factor_gaussian_curvature", None)
+    if dims is None and curvatures is None:
+        return [int(config.hyper_dim)], [float(config.gaussian_curvature)]
+    if dims is None or curvatures is None:
+        raise ValueError(
+            "prod_factor_dim and prod_factor_gaussian_curvature must both be set "
+            f"or both be null; got {dims} and {curvatures}."
+        )
+    return [int(d) for d in dims], [float(k) for k in curvatures]
+
+class HyperbolicDLMRefactor(BaseTrainer):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
-        self.bridge = HyperBridge()
-
-        # Model input z = (rho, u): the bridge radius plus its direction, a unit
-        # vector in R^hyper_dim (the boundary of H^hyper_dim is S^{hyper_dim-1}).
-        self.model_input_dim = config.hyper_dim + 1
-        # If False the per-word boundary angles phi_v stay fixed at (v+0.5)*2*pi/V
-        # instead of being read off the lm-head; the lm-head still trains as the
-        # logit readout. See the word_embedding property.
-        self.trainable_word_embedding = config.trainable_word_embedding
+        self.prod_factor_dim, self.prod_factor_gaussian_curvature = resolve_prod_factors(config)
+        self.embedding_size = sum(self.prod_factor_dim)
         self.seed = config.seed
+        # sample_radial builds the heat-kernel marginal in linear float64, which
+        # overflows past _radial_t_max(d) -- stated in UNIT time, so a factor of
+        # radius R tolerates R^2 times as much physical time. Clamping t is the
+        # same statistical no-op HyperBridge.bridge already relies on: by then
+        # the direction identifies the target to full float64 precision.
+        self.max_heat_time = min(
+            HyperBridge._radial_t_max(factor_dim)
+            * GeoUtils._curvature_scale(factor_curvature) ** 2
+            for factor_dim, factor_curvature in zip(
+                self.prod_factor_dim, self.prod_factor_gaussian_curvature
+            )
+        )
 
         if self.config.mode == "tnb":
-            self.model = MLPLM(
+            self.model = MLPLMRefactor(
                 vocab_size=config.vocab_size,
-                input_dim=self.model_input_dim,
-                output_dim=config.hyper_dim,
+                input_theta_dim=self.embedding_size,
+                input_radial_dim=len(self.prod_factor_dim),
+                output_theta_dim=self.embedding_size,
+                # Nothing consumes a predicted radius: the loss is the ANGULAR
+                # path-KL, so the trunk emits boundary features only.
+                output_radial_dim=0,
+                embedding_size=self.embedding_size,
                 hidden_size=config.hidden_size,
                 depth=config.depth,
+                max_seq_len=1,
                 unif_word_embedding=config.unif_word_embedding,
+                prod_factor_dim=self.prod_factor_dim,
+                prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
             )
+            if not config.trainable_word_embedding:
+                # Unlike main.py there is no "pinned angles, trainable head"
+                # split: lm_head.weight is simultaneously the boundary table the
+                # bridge samples toward, the table the loss scores against, and
+                # the table the model's own horosphere readout uses. Freezing it
+                # freezes all three, which is what keeps them consistent.
+                self.model.lm_head.weight.requires_grad_(False)
         elif self.config.mode == "opt":
-            self.model = OptimalModel(
+            self.model = OptimalModelRefactor(
                 ps=process_ps(config.ps),
+                embedding_size=self.embedding_size,
+                prod_factor_dim=self.prod_factor_dim,
+                prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
             )
         else:
             raise ValueError(f"mode shouldn't be {self.config.mode}, only support tnb and opt.")
 
+        # Every model on this path owns its boundary table, so the bridge, the
+        # loss and the model's horosphere readout all read the same one and
+        # nothing has to fabricate a fallback.
+        if self.model.word_embedding is None:
+            raise ValueError(
+                f"{type(self.model).__name__} has no word_embedding; "
+                "main_refactor requires every model to own a boundary table."
+            )
+
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=float(self.config.lr))
+        return torch.optim.Adam(
+            [p for p in self.parameters() if p.requires_grad], lr=float(self.config.lr)
+        )
 
     @property
-    def word_embedding(self) -> Optional[torch.Tensor]:
-        # Learnable boundary embedding (lm-head weights, shape (V, hyper_dim)) used to
-        # define each word's boundary angle phi_v = atan2(e_v). Returns None — so the
-        # bridge and loss fall back to fixed equally-spaced angles — when the backbone
-        # has no such table (e.g. OptimalModel) OR when trainable_word_embedding is
-        # False.
-        if not self.trainable_word_embedding:
-            return None
+    def word_embedding(self) -> torch.Tensor:
+        # ONE boundary table for the bridge, the loss and the model: MLPLM
+        # Refactor's lm_head.weight, or OptimalModelRefactor's frozen
+        # uniform_sphere_points buffer. Never None (checked in __init__).
         return self.model.word_embedding
 
     def get_logits_inputs(
@@ -66,8 +117,7 @@ class HyperbolicDLM(BaseTrainer):
         hyper_T: int,
         proposal_type: str,
         proposal_exp_rate: float,
-        vocab_size: int,
-        word_embedding: Optional[torch.FloatTensor],
+        word_embedding: torch.FloatTensor,
         device: torch.device,
         generator: Optional[torch.Generator] = None,
     ):
@@ -82,30 +132,34 @@ class HyperbolicDLM(BaseTrainer):
             generator=generator,
         )
 
-        # For calculating posterior
-        # Case 1: The word embedding is Equally divided around the circle
-        # rhos, thetas = self.bridge.bridge(ts=ts)
-        # if self.rotate_emb:
-        #     thetas = thetas + (
-        #         targets.to(dtype=torch.float64) + 0.5
-        #     ) * (2 * torch.pi / int(vocab_size))
-
-        # Case 2: The word embedding is learnable
-        if self.config.flow_path == FlowPath.HYPERBOLIC_BOUNDARY:
-            rhos, thetas = self.bridge.bridge(
-                ts=ts,
-                targets=targets,
-                vocab_size=vocab_size,
-                emb_dim=self.config.hyper_dim,
-                word_embedding=word_embedding,
+        if self.config.flow_path != FlowPath.HYPERBOLIC_BOUNDARY:
+            raise ValueError(
+                f"config.flow_path = {self.config.flow_path} is not supported, "
+                f"only suppport ({FlowPath.HYPERBOLIC_BOUNDARY})."
             )
-        else:
-            raise ValueError(f"config.flow_path = {self.config.flow_path} is not supported, only suppport ({FlowPath.HYPERBOLIC_BOUNDARY}).")
+        ts = ts.clamp_max(self.max_heat_time)
+        # rhos: (N, 1, M) one intrinsic radius per factor, thetas: (N, 1, sum(d_i))
+        # the per-factor unit directions concatenated.
+        rhos, thetas = HyperbolicHeatKernel.poincare_bridge_prod(
+            ts=ts,
+            targets=targets[:, None],
+            word_embedding=word_embedding.to(torch.float64),
+            output_coord=Coordinate.HYPERBOLIC_POLAR,
+            prod_factor_dim=self.prod_factor_dim,
+            prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+        )
 
-        # rhos: (N,), thetas: (N, hyper_dim) unit directions -> z: (N, hyper_dim + 1)
-        z = torch.cat([rhos[:, None], thetas], dim=-1).to(dtype=torch.float32)
-        logits = self.model(z=z, t=ts.to(dtype=torch.float32))
-        return logits, ts, rhos, thetas, proposal_weight
+        # The horosphere readout returns the FULL log-posterior (the geometry is
+        # already added), which is what the *_refactor losses consume -- they do
+        # not add horosphere_dists again. Axis 1 is the sequence.
+        logits = self.model(
+            z=None,
+            theta=thetas,
+            radius=rhos,
+            t=ts,
+            forward_type="horosphere",
+        ).squeeze(1)
+        return logits, ts, rhos.squeeze(1), thetas.squeeze(1), proposal_weight
 
     def _compute_losses(self, batch: torch.Tensor, batch_idx: int = 0, stage: int = 0):
         targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
@@ -120,12 +174,11 @@ class HyperbolicDLM(BaseTrainer):
             hyper_T=self.config.hyper_T,
             proposal_type=self.config.loss_proposal_type,
             proposal_exp_rate=self.config.loss_proposal_exp_rate,
-            vocab_size=self.config.vocab_size,
             word_embedding=self.word_embedding,
             device=self.device,
             generator=loss_gen,
         )
-        wloss, loss = Loss.weighted_loss(
+        wloss, loss = Loss.weighted_loss_refactor(
             logits=logits_loss,
             targets=targets,
             rhos=rhos_loss,
@@ -133,10 +186,12 @@ class HyperbolicDLM(BaseTrainer):
             proposal_weight=pw_loss,
             loss_geometry=self.config.loss_geometry,
             word_embedding=self.word_embedding,
+            prod_factor_dim=self.prod_factor_dim,
+            prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
         )
-        # ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
 
-        # Reference CE and ELBO
+        # Reference CE and ELBO, on an independent RNG stream (salt=1) so they
+        # stay comparable across runs trained on different objectives.
         ref_gen = self._make_step_generator(salt=1, batch_idx=batch_idx, stage=stage)
         logits_ref, ts_ref, rhos_ref, thetas_ref, pw_ref = self.get_logits_inputs(
             batch_size=batch_size,
@@ -145,12 +200,11 @@ class HyperbolicDLM(BaseTrainer):
             hyper_T=self.config.hyper_T,
             proposal_type=self.config.ref_proposal_type,
             proposal_exp_rate=self.config.ref_proposal_exp_rate,
-            vocab_size=self.config.vocab_size,
             word_embedding=self.word_embedding,
             device=self.device,
             generator=ref_gen,
         )
-        wnelbo_ref, nelbo_ref = Loss.weighted_loss(
+        wnelbo_ref, nelbo_ref = Loss.weighted_loss_refactor(
             logits=logits_ref,
             targets=targets,
             rhos=rhos_ref,
@@ -158,8 +212,10 @@ class HyperbolicDLM(BaseTrainer):
             proposal_weight=pw_ref,
             loss_geometry=LossGeometry.POINCARE_POLAR,
             word_embedding=self.word_embedding,
+            prod_factor_dim=self.prod_factor_dim,
+            prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
         )
-        wce_ref, ce_ref = Loss.weighted_loss(
+        wce_ref, ce_ref = Loss.weighted_loss_refactor(
             logits=logits_ref,
             targets=targets,
             rhos=rhos_ref,
@@ -167,6 +223,8 @@ class HyperbolicDLM(BaseTrainer):
             proposal_weight=pw_ref,
             loss_geometry=LossGeometry.CROSS_ENTROPY,
             word_embedding=self.word_embedding,
+            prod_factor_dim=self.prod_factor_dim,
+            prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
         )
 
         return {
@@ -180,7 +238,7 @@ class HyperbolicDLM(BaseTrainer):
             "proposal_weight": pw_loss.to(dtype=torch.float32),
         }
 
-@hydra.main(version_base=None, config_path="config", config_name="config")
+@hydra.main(version_base=None, config_path="config", config_name="config_refactor")
 def main(cfg: DictConfig) -> None:
     datamodule = UnigramDataModule(config=cfg)
     cfg.ps = datamodule.ps
@@ -191,7 +249,11 @@ def main(cfg: DictConfig) -> None:
         return
 
     L.seed_everything(int(cfg.seed), workers=True)
-    model = HyperbolicDLM(config=cfg)
+    model = HyperbolicDLMRefactor(config=cfg)
+    print(
+        f"Geometry: prod_factor_dim={model.prod_factor_dim} "
+        f"prod_factor_gaussian_curvature={model.prod_factor_gaussian_curvature}"
+    )
     trainer = L.Trainer(
         accelerator="auto",
         devices=1,
@@ -225,8 +287,6 @@ def main(cfg: DictConfig) -> None:
     metrics_path = save_results(test_metrics, cfg.folder)
     print(f"Saved test metrics to: {metrics_path}")
     if cfg.mode == "tnb":
-        # Final weights (a few KB): the lm_head rows are the learned boundary
-        # embedding, so a finished run can be re-evaluated and its phi inspected.
         torch.save(model.model.state_dict(), os.path.join(cfg.folder, "model.pt"))
 
     task_mgr.finished()

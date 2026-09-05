@@ -761,7 +761,7 @@ class Loss:
         )
 
     @staticmethod
-    def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
+    def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar", prod_factor_dim=None, prod_factor_gaussian_curvature=None):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
             bridge = Loss.bridge_loss_elbo_refactor(
                 logits=logits,
@@ -769,6 +769,8 @@ class Loss:
                 rhos=rhos,
                 thetas=thetas,
                 word_embedding=word_embedding,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
             bridge = Loss.bridge_loss_crossentropy_refactor(

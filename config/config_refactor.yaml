@@ -1,0 +1,60 @@
+# Refactored unigram bridge training (main_refactor.py). Same objectives as
+# config.yaml, run through the product-manifold path:
+#   MLPLMRefactor / OptimalModelRefactor  (horosphere readout: the logits the
+#     model returns are ALREADY the log-posterior)
+#   Loss.weighted_loss_refactor           (angular path-KL / denoising CE)
+#   HyperBridge.bridge_prod               (one radius per factor)
+mode: tnb  # tnb = train MLPLMRefactor, opt = OptimalModelRefactor (no training)
+ps: naive_ps
+vocab_size: 10
+train_size: 20000
+val_size: 4000
+test_size: 4000000
+batch_size: 2048
+num_workers: 0
+seed: 42
+
+# --- geometry -----------------------------------------------------------------
+# Single manifold: hyper_dim sets the boundary dimension and gaussian_curvature
+# its curvature K < 0. K = -1 reproduces main.py's geometry.
+hyper_dim: 3
+gaussian_curvature: -1.0
+# Product manifold H^{d_1}_{K_1} x ... x H^{d_M}_{K_M}: set BOTH lists (they
+# must have the same length) and hyper_dim / gaussian_curvature are ignored.
+#   prod_factor_dim: [2, 2]
+#   prod_factor_gaussian_curvature: [-1.0, -0.25]
+prod_factor_dim: null
+prod_factor_gaussian_curvature: null
+
+hidden_size: 128
+depth: 3
+# The lm_head rows ARE the boundary table the bridge, the loss and the model's
+# own horosphere readout all read, so this freezes the geometry as well as the
+# readout -- there is no "pinned angles, trainable head" split here.
+trainable_word_embedding: true
+unif_word_embedding: false
+flow_path: hyperbolic_boundary
+hyper_dt: 0.01
+hyper_T: 10000000
+
+loss_geometry: cross_entropy
+loss_proposal_type: exp
+loss_proposal_exp_rate: 0.1
+ref_proposal_type: exp
+ref_proposal_exp_rate: 0.1
+
+lr: 0.001
+max_steps: 20000
+gradient_clip_val: 1.0
+
+run_name: unigram_refactor_m-${mode}_lg-${loss_geometry}_d-${hyper_dim}_k-${gaussian_curvature}_twe-${trainable_word_embedding}_q-${loss_proposal_type}${loss_proposal_exp_rate}_lr${lr}_st${max_steps}_s${seed}
+folder: output/${run_name}
+loss_data_path: loss_history.json
+loss_plot_path: loss_curves.jpg
+loss_plot_ma_window: null
+
+hydra:
+  run:
+    dir: ${folder}
+  job:
+    chdir: false

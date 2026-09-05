@@ -59,9 +59,10 @@ class HyperbolicModelBase(nn.Module, ABC):
     Subclasses supply the trunk (`model_forward`), the boundary table
     (`word_embedding`), and three attributes this class reads: `lm_head`
     (the trunk-features -> vocabulary readout), `output_radial_dim` (how many
-    trailing trunk channels are the predicted radius rather than features),
-    `vocab_size`, and the factor spec `prod_factor_dim` /
-    `prod_factor_gaussian_curvature` the horosphere readout defaults to.
+    trailing trunk channels are the predicted radius rather than features), and
+    the factor spec `prod_factor_dim` / `prod_factor_gaussian_curvature` the
+    horosphere readout defaults to. `word_embedding` is required, not optional:
+    the horosphere readout has no table of its own to fall back on.
 
     Two readouts, differing only in who adds the geometry:
       naive       -- returns `lm_head`'s logits untouched. Per Invariant 1 those
@@ -345,10 +346,11 @@ class HyperbolicModelBase(nn.Module, ABC):
         """
         embedding = self.word_embedding
         if embedding is None:
-            # Same word -> direction map the bridge falls back to when no table
-            # is given, so the two stay consistent (HyperBridge._vocab_angles).
-            embedding = uniform_sphere_points(
-                self.vocab_size, theta.shape[-1], device=theta.device, dtype=torch.float64
+            raise ValueError(
+                f"{type(self).__name__}.word_embedding is None; the horosphere "
+                "readout needs the per-word boundary directions. Every model on "
+                "this path owns a table -- MLPLMRefactor's lm_head.weight, "
+                "OptimalModelRefactor's frozen uniform_sphere_points buffer."
             )
         embedding = embedding.to(torch.float64)
         dims, curvatures = self.prod_factors(
@@ -580,14 +582,16 @@ class OptimalModelRefactor(HyperbolicModelBase):
     optimal logits for the bridge losses, since
     `softmax(horosphere_dists + log_ps)` recovers the true posterior
     q(y | x_t) ∝ p(y) · prod_i (Poisson kernel)_i. Nothing is trained, so the
-    trunk is a constant and `lm_head` is the identity; with `word_embedding`
-    None the horosphere readout falls back to the same fixed boundary table the
-    bridge uses.
+    trunk is a constant and `lm_head` is the identity, and the boundary table is
+    a frozen `uniform_sphere_points` draw held as a buffer -- not a Parameter,
+    so it never takes a gradient, and it is the same table the bridge and the
+    loss use for their own reference geometry.
     """
 
     def __init__(
         self,
         ps,
+        embedding_size: int,
         prod_factor_dim: Optional[List[int]] = None,
         prod_factor_gaussian_curvature: Optional[List[float]] = None,
     ):
@@ -595,18 +599,34 @@ class OptimalModelRefactor(HyperbolicModelBase):
         ps = torch.as_tensor(ps, dtype=torch.float64)
         self.register_buffer("log_ps", (ps / ps.sum()).log())
         self.vocab_size: int = self.log_ps.numel()
+        self.embedding_size: int = embedding_size
         # forward_naive's contract: the trunk output IS the logit vector (no
         # projection) and no trailing channel is a predicted radius.
         self.lm_head = nn.Identity()
         self.output_radial_dim: int = 0
         self.prod_factor_dim: Optional[Union[int, List[int]]] = prod_factor_dim
         self.prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = prod_factor_gaussian_curvature
+        self.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        # Frozen boundary table: unit rows spread uniformly over the sphere, the
+        # same draw HyperBridge._vocab_angles falls back to, so the reference
+        # model's geometry matches the bridge's word -> direction map exactly. A
+        # buffer, so .to(device) carries it and no optimizer ever sees it.
+        self.register_buffer(
+            "_word_embedding",
+            uniform_sphere_points(self.vocab_size, embedding_size, dtype=torch.float64),
+        )
         print(f"self.ps: {self.log_ps.exp()}")
         print(f"self.log_ps: {self.log_ps}")
 
     @property
-    def word_embedding(self) -> Optional[torch.Tensor]:
-        return None
+    def word_embedding(self) -> torch.Tensor:
+        # (vocab_size, embedding_size), frozen. Same row-per-word contract as
+        # MLPLMRefactor's lm_head.weight.
+        return self._word_embedding
 
     def model_forward(
         self,
