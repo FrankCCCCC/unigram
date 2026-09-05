@@ -400,9 +400,9 @@ $$
 
 ---
 
-## Continuous time Poincare Disk Brownian Bridge ELBO
+## Angular Component of the Poincare Disk Bridge
 
-Assume the true and learned bridges share the initial law and the noise. The physical diffusion $g_{\mathrm{PD}}(R)$, target drift $b_x^{\mathrm{PD}}$, and learned drift $b_\theta^{\mathrm{PD}}$ are
+Assume the true and learned bridges share the initial law and the noise. The angular diffusion $g_{\mathrm{PD}}(R)$, target angular drift $b_x^{\mathrm{PD}}$, and shared-denominator learned angular drift $b_\theta^{\mathrm{PD}}$ are
 
 $$
 g_{\mathrm{PD}}(R) = \frac{\kappa}{\sinh(\kappa R)},
@@ -424,13 +424,13 @@ $$
 
 ---
 
-## Continuous time Poincare Disk Brownian Bridge ELBO
+## Shared-$D_x$ Angular Path-KL
 
 Conditioning the physical-time path-KL on the radius $R_t=R$ gives
 $$
 \boxed{
 \begin{aligned}
-\mathcal L_{\mathrm{PD}}(\theta)
+\mathcal L_{\mathrm{PD,ang}}(\theta)
 &=
 \frac12
 \mathbb E_{x\sim p_{\mathrm{data}}}
@@ -451,11 +451,146 @@ g_{\mathrm{PD}}(R)^2
 $$
 
 - In physical coordinates, $p_t^{\mathrm{rad},\kappa}$, $q_R^{(\kappa)}$, and the normalized drift error all depend on $\kappa$.
-- Taking $R_{\max}=\infty$ and $T=\infty$ gives the full angular path-KL (add the radial term for the total).
+- Taking $R_{\max}=\infty$ and $T=\infty$ gives the full **angular** path-KL for this shared-$D_x$ parameterization.
+- This is not yet the full hyperbolic path-KL: the radial drift error is still missing.
 
 ---
 
-## Curvature Enters the Conditional KL Rate
+## A Full Hyperbolic ELBO Needs Every Endpoint Drift
+
+Let $\{e_v\}_{v=1}^V\subset\mathbb S^{d-1}$ be the vocabulary boundary endpoints and let the target be $x=e_y$. For every possible endpoint $e_v$, define
+$$
+\begin{aligned}
+D_{e_v}^{(\kappa)}(R,\theta_z)
+&:=\cosh(\kappa R)-\sinh(\kappa R)\langle e_v,\theta_z\rangle,\\
+A_{e_v}^{(\kappa)}(R,\theta_z)
+&:=\frac{\cosh(\kappa R)\langle e_v,\theta_z\rangle-\sinh(\kappa R)}
+{D_{e_v}^{(\kappa)}(R,\theta_z)},\\
+C_{e_v}^{(\kappa)}(R,\theta_z)
+&:=\frac{P_{\theta_z}e_v}{D_{e_v}^{(\kappa)}(R,\theta_z)},
+\qquad P_{\theta_z}:=I_d-\theta_z\theta_z^\top.
+\end{aligned}
+$$
+
+$A_{e_v}^{(\kappa)}$ is the endpoint-dependent radial component and $C_{e_v}^{(\kappa)}$ is the endpoint-dependent angular component.
+
+---
+
+## The Learned Full Drift Is a Posterior Mixture
+
+Let
+$$
+p_{\theta,v}(z_t,t):=p_\theta(Y_\infty=e_v\mid z_t,t),
+\qquad \sum_{v=1}^V p_{\theta,v}(z_t,t)=1,
+$$
+and define the posterior-mixture components
+$$
+\overline A_\theta(z_t,t)
+:=\sum_{v=1}^V p_{\theta,v}(z_t,t)A_{e_v}^{(\kappa)}(R,\theta_z),
+\qquad
+\overline C_\theta(z_t,t)
+:=\sum_{v=1}^V p_{\theta,v}(z_t,t)C_{e_v}^{(\kappa)}(R,\theta_z).
+$$
+
+The common radial baseline and angular Itô correction cancel between the target and learned bridges. Therefore
+$$
+\begin{aligned}
+b_x^\rho-b_\theta^\rho
+&=(d-1)\kappa\left(A_x^{(\kappa)}-\overline A_\theta\right),\\
+b_x^{\mathbb S}-b_\theta^{\mathbb S}
+&=\frac{(d-1)\kappa^2}{\sinh(\kappa R)}
+\left(C_x^{(\kappa)}-\overline C_\theta\right).
+\end{aligned}
+$$
+
+---
+
+## Full Conditional KL Rate = Radial + Angular
+
+The radial and spherical noises are orthogonal, with
+$g_\rho(R)=1$ and $g_{\mathrm{PD}}(R)=\kappa/\sinh(\kappa R)$. Hence
+$$
+\boxed{
+\begin{aligned}
+\ell_{\mathrm{PD,full}}(z_t,x,t)
+&=\frac12\left[
+\frac{|b_x^\rho-b_\theta^\rho|^2}{g_\rho(R)^2}
++\frac{\|b_x^{\mathbb S}-b_\theta^{\mathbb S}\|^2}{g_{\mathrm{PD}}(R)^2}
+\right]\\
+&=\frac{(d-1)^2\kappa^2}{2}
+\left[
+\left(A_x^{(\kappa)}-\overline A_\theta\right)^2
++\left\|C_x^{(\kappa)}-\overline C_\theta\right\|^2
+\right].
+\end{aligned}
+}
+$$
+
+Equivalently, with $w_{e_v}^{(\kappa)}:=A_{e_v}^{(\kappa)}\theta_z+C_{e_v}^{(\kappa)}$,
+$$
+\ell_{\mathrm{PD,full}}
+=\frac{(d-1)^2\kappa^2}{2}
+\left\|w_x^{(\kappa)}-\sum_{v=1}^Vp_{\theta,v}w_{e_v}^{(\kappa)}\right\|^2.
+$$
+
+---
+
+## Complete Physical-Time Hyperbolic ELBO
+
+Conditioning $z_t=(R,\theta_{z_R})$ on its radius gives the complete path-KL term
+$$
+\boxed{
+\begin{aligned}
+\mathcal L_{\mathrm{PD,full}}(\theta)
+&=
+\mathbb E_{x\sim p_{\mathrm{data}}}
+\left[
+\int_0^T
+\mathbb E_{z_t\sim q_t(\cdot\mid x)}
+\left[\ell_{\mathrm{PD,full}}(z_t,x,t)\right]dt
+\right]\\
+&=
+\mathbb E_{x\sim p_{\mathrm{data}}}
+\left[
+\int_0^T\!\int_0^{R_{\max}}
+p_t^{\mathrm{rad},\kappa}(R)
+\mathbb E_{\theta_{z_R}\sim q_R^{(\kappa)}(\cdot\mid x)}
+\left[\ell_{\mathrm{PD,full}}(R,\theta_{z_R},x,t)\right]
+dR\,dt
+\right].
+\end{aligned}
+}
+$$
+
+Taking $T=R_{\max}=\infty$ gives the complete infinite-horizon hyperbolic path-KL, including both drift components.
+
+---
+
+## The Shared-$D_x$ Objective Is Only an Angular Surrogate
+
+The earlier learned angular drift imposes the target denominator on the posterior mean
+$$
+\widehat x_\theta=\sum_{v=1}^Vp_{\theta,v}e_v,
+\qquad
+\ell_{\mathrm{PD,ang}}^{\mathrm{shared}\text{-}D_x}
+=\frac{(d-1)^2\kappa^2}{2D_x^{(\kappa)}(R,\theta_z)^2}
+\left\|P_{\theta_z}(x-\widehat x_\theta)\right\|^2.
+$$
+
+The full posterior-mixture angular term instead uses
+$$
+C_x^{(\kappa)}-\overline C_\theta
+=
+\frac{P_{\theta_z}x}{D_x^{(\kappa)}}
+-\sum_{v=1}^Vp_{\theta,v}
+\frac{P_{\theta_z}e_v}{D_{e_v}^{(\kappa)}}.
+$$
+
+Therefore the two objectives agree only in special cases; the shared-$D_x$ step is not an algebraic identity.
+
+---
+
+## Curvature Enters the Shared-$D_x$ Angular Rate
 
 Writing $P_{\theta_{z_R}} = I_d - \theta_{z_R} \theta_{z_R}^\top$,
 $$
@@ -473,11 +608,11 @@ $$
 
 ---
 
-# Decompose Radius and Angles
+# Condition the Angular Objective on Radius and Angle
 
 $$
 \begin{aligned}
-\mathcal L_{\mathrm{PD}}(\theta)
+\mathcal L_{\mathrm{PD,ang}}(\theta)
 &=
 \frac12
 \mathbb E_{x\sim p_{\mathrm{data}}}
@@ -521,7 +656,7 @@ $$
 
 ---
 
-## When Is the Hyperbolic ELBO Curvature-Invariant?
+## When Is the Angular Path-KL Curvature-Invariant?
 
 Set the dimensionless radius and time to
 $$
@@ -570,7 +705,7 @@ Thus the Jacobian $dR=du/\kappa$ is already absorbed into the transformed densit
 
 ---
 
-## When Is the Hyperbolic ELBO Curvature-Invariant?
+## When Is the Angular Path-KL Curvature-Invariant?
 
 With $g_{\mathrm{PD}}(R) = \frac{\kappa}{\sinh(\kappa R)}$ and $p_t^{\mathrm{rad},\kappa}(R)=\kappa\,\widetilde p_\tau^{\mathrm{rad}}(u)$,
 
@@ -598,7 +733,7 @@ $$
 
 $$
 \begin{aligned}
-\mathcal L_{\mathrm{PD}}(\theta)
+\mathcal L_{\mathrm{PD,ang}}(\theta)
 &=
 \frac12
 \mathbb E_{x\sim p_{\mathrm{data}}}
@@ -652,7 +787,7 @@ The $\kappa^2$ KL rate cancels with $dt=d\tau/\kappa^2$, giving
 $$
 \boxed{
 \begin{aligned}
-\mathcal L_{\mathrm{PD}}^{(\kappa)}(T,R_{\max})
+\mathcal L_{\mathrm{PD,ang}}^{(\kappa)}(T,R_{\max})
 &=
 \frac{(d-1)^2}{2}\mathbb E_x
 \left[
@@ -674,9 +809,9 @@ Therefore:
 
 ---
 
-# What Curvature Actually Controls
+# What Curvature Controls in the Angular Objective
 
-- Curvature only controls the weight, but ELBO is invariant to curvature for infinite time and radius interval
+- Curvature controls the weighting, but the angular objective is invariant to curvature over infinite time and radius intervals
 - Curvature therefore controls decoding speed and which noise levels receive training mass.
 
 ---
@@ -723,7 +858,7 @@ Substituting the embedding bound into the path-KL term gives
 $$
 \boxed{
 \begin{aligned}
-\mathcal L_{\mathrm{PD}}(\theta)
+\mathcal L_{\mathrm{PD,ang}}(\theta)
 &\leq
 (d-1)^2\mathbb E_y
 \left[
@@ -744,7 +879,7 @@ $$
 
 # Conclusion
 
-- Curvature controls the variance of the ELBO
+- Curvature controls the variance of the angular path-KL estimator
 - Can we make the geometry adaptive to the implied tree structure?
 
 ---
@@ -784,7 +919,7 @@ $$
 
 ---
 
-### ELBO of Hyperbolic Product Manifold, Infinite Horizon
+### Shared-$D_{x_m}$ Angular Product Objective
 
 Set $u_m=\kappa_mR_m$ and $\tau_m=\kappa_m^2t$. Since
 
@@ -793,11 +928,11 @@ $$
 =\widetilde p_{\tau_m}^{\mathrm{rad}}(u_m)du_m d\tau_m
 $$
 
-the infinite-horizon ELBO is
+the infinite-horizon shared-$D_{x_m}$ angular objective is
 
 $$
 \begin{aligned}
-\mathcal L_{\mathrm{Prod}}
+\mathcal L_{\mathrm{Prod,ang}}
 &=
 \sum_{m=1}^{M} \frac{(d_m-1)^2}{2}\mathbb E_x
 \left[
@@ -811,7 +946,101 @@ $$
 \end{aligned}
 $$
 
-Thus, assuming scale-equivariant predictors and convergent integrals, the product ELBO is invariant to $\boldsymbol\kappa$.
+Thus, assuming factorwise scale-equivariant predictors and convergent integrals, this angular product objective is invariant to $\boldsymbol\kappa$.
+
+---
+
+## Full Product Drift Uses the Joint Posterior
+
+Write the endpoint of word $v$ in factor $m$ as $e_{v,m}\in\mathbb S^{d_m-1}$ and $x_m=e_{y,m}$. Define
+$$
+\begin{aligned}
+D_{e_{v,m}}(u_m,\theta_{u_m})
+&:=\cosh(u_m)-\sinh(u_m)\langle e_{v,m},\theta_{u_m}\rangle,\\
+A_{e_{v,m}}(u_m,\theta_{u_m})
+&:=\frac{\cosh(u_m)\langle e_{v,m},\theta_{u_m}\rangle-\sinh(u_m)}
+{D_{e_{v,m}}(u_m,\theta_{u_m})},\\
+C_{e_{v,m}}(u_m,\theta_{u_m})
+&:=\frac{P_{\theta_{u_m}}e_{v,m}}
+{D_{e_{v,m}}(u_m,\theta_{u_m})},\\
+w_{e_{v,m}}&:=A_{e_{v,m}}\theta_{u_m}+C_{e_{v,m}}.
+\end{aligned}
+$$
+
+The same joint posterior over words is used in every factor:
+$$
+p_{\theta,v}(\mathbf z_t,t)
+:=p_\theta(Y_\infty=e_v\mid \mathbf z_t,t),
+\qquad
+\overline w_{\theta,m}:=\sum_{v=1}^Vp_{\theta,v}(\mathbf z_t,t)w_{e_{v,m}}.
+$$
+
+---
+
+## Full Product KL Rate Adds Across Factors
+
+Independent factor noises make the full conditional KL rates add:
+$$
+\boxed{
+\ell_{\mathrm{Prod,full}}(\mathbf z_t,y,t)
+=\frac12\sum_{m=1}^M(d_m-1)^2\kappa_m^2
+\left\|w_{x_m}-\overline w_{\theta,m}\right\|^2.
+}
+$$
+
+The summand contains both the radial error
+$|A_{x_m}-\sum_vp_{\theta,v}A_{e_{v,m}}|^2$ and the angular error
+$\|C_{x_m}-\sum_vp_{\theta,v}C_{e_{v,m}}\|^2$ because these components are orthogonal.
+
+---
+
+## Complete Product-Manifold Hyperbolic ELBO
+
+Therefore the complete physical-time path-KL is
+$$
+\boxed{
+\begin{aligned}
+\mathcal L_{\mathrm{Prod,full}}(\theta)
+&=\mathbb E_{y\sim p_{\mathrm{data}}}
+\left[
+\int_0^T
+\mathbb E_{\mathbf z_t\sim q_t(\cdot\mid y)}
+\left[\ell_{\mathrm{Prod,full}}(\mathbf z_t,y,t)\right]dt
+\right]\\
+&=\mathbb E_y\left[
+\int_0^T\!\int_{\mathbb R_+^M}
+\prod_{m=1}^M p_{m,t}^{\mathrm{rad},\kappa_m}(R_m)
+\mathbb E_{\boldsymbol\theta\sim\prod_mq_{u_m}(\cdot\mid x_m)}
+\left[\ell_{\mathrm{Prod,full}}\right]
+d\mathbf R\,dt
+\right].
+\end{aligned}
+}
+$$
+
+Because $p_{\theta,v}(\mathbf z_t,t)$ can couple all factors, this full objective does not generally split into independent $\tau_m=\kappa_m^2t$ integrals.
+
+Invariance to $\boldsymbol\kappa$ therefore requires an additional factorization/equivariance assumption.
+
+---
+
+## Relation to the Implemented Losses
+
+For one factor with $K=-1$, the complete local rate is
+$$
+\ell_{\mathrm{PD,full}}
+=\frac{(d-1)^2}{2}
+\left\|w_x-\sum_{v=1}^Vp_{\theta,v}w_{e_v}\right\|^2,
+$$
+which is the quantity evaluated by `bridge_loss_poincare_disk_polar` before time-proposal weighting.
+
+The refactored loss evaluates instead
+$$
+\ell_{\mathrm{PD,ang}}^{\mathrm{shared}\text{-}D_x}
+=\frac{(d-1)^2\kappa^2}{2D_x^2}
+\left\|P_{\theta_z}(x-\widehat x_\theta)\right\|^2,
+$$
+factor by factor. It omits the radial error and replaces the per-endpoint $D_{e_v}$ with the target denominator $D_x$.
 
 ---
 
@@ -822,4 +1051,3 @@ Thus, assuming scale-equivariant predictors and convergent integrals, the produc
 - Intuively, adaptive curvature means allocate proper step size and time budget on various depth of trees, which can solve the ill condition problem on word embedding for DLM.
 
 ---
-
