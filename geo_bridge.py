@@ -277,7 +277,9 @@ class GeoUtils:
         return torch.where(d_col < 1e-6, euclid, gamma)
 
     @staticmethod
-    def _curvature_scale(gaussian_curvature: float) -> float:
+    def _curvature_scale(
+        gaussian_curvature: Union[float, List[float], torch.Tensor]
+    ) -> Union[float, List[float], torch.Tensor]:
         """Validate `K != 0` and return the model radius `R = 1/sqrt(|K|)`.
 
         The curvature-`K` model surfaces are the unit ones scaled by `R`: the
@@ -287,11 +289,19 @@ class GeoUtils:
         coordinates by `R` is the isometry onto the unit surface and maps the
         intrinsic radial `rho -> rho / R`.
         """
-        if gaussian_curvature == 0.0:
-            raise ValueError(
-                "gaussian_curvature must be nonzero (K < 0 hyperbolic, K > 0 spherical)"
-            )
-        return 1.0 / math.sqrt(abs(gaussian_curvature))
+        if isinstance(gaussian_curvature, (float, int)):
+            if gaussian_curvature == 0.0:
+                raise ValueError(
+                    "gaussian_curvature must be nonzero (K < 0 hyperbolic, K > 0 spherical)"
+                )
+            return 1.0 / math.sqrt(abs(gaussian_curvature))
+        elif isinstance(gaussian_curvature, (list, tuple)):
+            curv = [1.0 / math.sqrt(abs(gc)) for gc in gaussian_curvature]
+            return curv
+        elif torch.is_tensor(gaussian_curvature):
+            return 1.0 / torch.sqrt(gaussian_curvature.abs())
+        else:
+            raise TypeError(f"Arguement gaussian_curvature only supports float, List[float], or torch.Tensor, {type(gaussian_curvature)} is not supported.")
 
     # ---------------------------------------------------------------------------
     # Random-distribution generators
