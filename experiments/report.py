@@ -60,8 +60,10 @@ PS_ORDER = ["naive_ps", "cmplx_ps", "cmplx_ps1",
 # hand, not by this script, so it is carried across a regeneration verbatim.
 HANDWRITTEN_MARKER = "# Insights and conclusions"
 
+# `_k-<gaussian_curvature>` is optional: projects that sweep curvature put it in
+# the run name, projects whose geometry is fixed keep it in the project name.
 RUN_RE = re.compile(
-    r"^ps-(?P<ps>.+?)_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
+    r"^ps-(?P<ps>.+?)(?:_k-(?P<k>[^_]+))?_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
     r"_qref-(?P<qref>[^_]+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$"
 )
 
@@ -74,10 +76,10 @@ def rate_of(q: str) -> float:
 
 
 def collect(project: str):
-    """(ps, steps, lg, q) -> {metric_label: [values across seeds]}"""
+    """(ps, k, steps, lg, q) -> {metric_label: [values across seeds]}"""
     root = REPO_DIR / "output" / project
     cells: dict[tuple, dict[str, list[float]]] = {}
-    ps_seen, steps_seen, missing, unparsed = [], set(), 0, []
+    ps_seen, k_seen, steps_seen, missing, unparsed = [], [], set(), 0, []
     for run in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "logs"):
         m = RUN_RE.match(run.name)
         if not m:
@@ -88,7 +90,7 @@ def collect(project: str):
             missing += 1
             continue
         data = json.load(f.open())
-        key = (m["ps"], int(m["st"]), m["lg"], m["q"])
+        key = (m["ps"], m["k"], int(m["st"]), m["lg"], m["q"])
         bucket = cells.setdefault(key, {})
         for label, metric_key in COLUMNS:
             value = data.get(metric_key)
@@ -96,8 +98,10 @@ def collect(project: str):
                 bucket.setdefault(label, []).append(float(value))
         if m["ps"] not in ps_seen:
             ps_seen.append(m["ps"])
+        if m["k"] not in k_seen:
+            k_seen.append(m["k"])
         steps_seen.add(int(m["st"]))
-    return cells, ps_seen, sorted(steps_seen), missing, unparsed
+    return cells, ps_seen, k_seen, sorted(steps_seen), missing, unparsed
 
 
 def fmt(values: list[float] | None, n_expected: int) -> str:
@@ -109,11 +113,12 @@ def fmt(values: list[float] | None, n_expected: int) -> str:
     return cell if len(values) >= n_expected else f"{cell} (n={len(values)})"
 
 
-def table(cells, ps: str, steps: int, lg: str, rates: list[str], n_expected: int) -> list[str]:
+def table(cells, ps: str, k: str | None, steps: int, lg: str,
+          rates: list[str], n_expected: int) -> list[str]:
     header = "| loss Proposal | " + " | ".join(label for label, _ in COLUMNS) + " |"
     lines = [header, "|---" * (1 + len(COLUMNS)) + "|"]
     for q in rates:
-        bucket = cells.get((ps, steps, lg, q))
+        bucket = cells.get((ps, k, steps, lg, q))
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag] + [
             fmt(bucket.get(label) if bucket else None, n_expected) for label, _ in COLUMNS
@@ -122,21 +127,23 @@ def table(cells, ps: str, steps: int, lg: str, rates: list[str], n_expected: int
     return lines
 
 
-def dense_table(cells, ps: str, steps: int, rates: list[str], n_expected: int) -> list[str]:
+def dense_table(cells, ps: str, k: str | None, steps: int,
+                rates: list[str], n_expected: int) -> list[str]:
     header = "| Proposal | " + " | ".join(label for label, _ in DENSE_COLUMNS) + " |"
     lines = [header, "|---" * (1 + len(DENSE_COLUMNS)) + "|"]
     for q in rates:
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag]
         for _, lg in DENSE_COLUMNS:
-            bucket = cells.get((ps, steps, lg, q))
+            bucket = cells.get((ps, k, steps, lg, q))
             row.append(fmt(bucket.get("wloss") if bucket else None, n_expected))
         lines.append("| " + " | ".join(row) + " |")
     return lines
 
 
-def section_title(ps: str, steps: int, multi_step: bool) -> str:
-    return f"## {ps}, Training Step {steps}" if multi_step else f"## {ps}"
+def section_title(ps: str, k: str | None, steps: int, multi_step: bool) -> str:
+    title = f"## {ps}" if k is None else f"## {ps}, K = {k}"
+    return f"{title}, Training Step {steps}" if multi_step else title
 
 
 def handwritten_tail(dest: Path) -> list[str]:
@@ -155,11 +162,15 @@ def main() -> None:
                     help="expected seeds per cell; cells with fewer are marked (n=k)")
     args = ap.parse_args()
 
-    cells, ps_list, steps_list, missing, unparsed = collect(args.project)
+    cells, ps_list, k_list, steps_list, missing, unparsed = collect(args.project)
     ps_list.sort(key=lambda p: (PS_ORDER.index(p) if p in PS_ORDER else len(PS_ORDER), p))
-    rates = sorted({k[3] for k in cells}, key=rate_of)
+    # Curvature sections run from flattest to sharpest; None is the single
+    # "geometry fixed by the project name" section.
+    k_list.sort(key=lambda x: (x is not None, -float(x) if x is not None else 0.0))
+    rates = sorted({key[4] for key in cells}, key=rate_of)
     n_runs = sum(len(v.get("wnelbo_ref", [])) for v in cells.values())
-    total = len(ps_list) * len(steps_list) * len(GEOMETRY_TITLE) * len(rates) * args.seeds
+    total = (len(ps_list) * len(k_list) * len(steps_list)
+             * len(GEOMETRY_TITLE) * len(rates) * args.seeds)
 
     out = [
         f"# {args.project} results",
@@ -182,21 +193,23 @@ def main() -> None:
     multi_step = len(steps_list) > 1
     out += ["", "---", "", "# Results (Full Table)", ""]
     for ps in ps_list:
-        for steps in steps_list:
-            out += ["---", "", section_title(ps, steps, multi_step), "",
-                    "Each cell: avg & std across seed", ""]
-            for lg, title in GEOMETRY_TITLE:
-                out += [f"**{title}**", ""]
-                out += table(cells, ps, steps, lg, rates, args.seeds)
-                out += [""]
+        for k in k_list:
+            for steps in steps_list:
+                out += ["---", "", section_title(ps, k, steps, multi_step), "",
+                        "Each cell: avg & std across seed", ""]
+                for lg, title in GEOMETRY_TITLE:
+                    out += [f"**{title}**", ""]
+                    out += table(cells, ps, k, steps, lg, rates, args.seeds)
+                    out += [""]
 
     out += ["---", "", "# RESULTS (Dense Table)", ""]
     for ps in ps_list:
-        for steps in steps_list:
-            out += ["---", "", section_title(ps, steps, multi_step), "",
-                    DENSE_NOTE, ""]
-            out += dense_table(cells, ps, steps, rates, args.seeds)
-            out += [""]
+        for k in k_list:
+            for steps in steps_list:
+                out += ["---", "", section_title(ps, k, steps, multi_step), "",
+                        DENSE_NOTE, ""]
+                out += dense_table(cells, ps, k, steps, rates, args.seeds)
+                out += [""]
 
     dest = REPO_DIR / "experiments" / args.project / "RESULTS.md"
     out += handwritten_tail(dest)
