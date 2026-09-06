@@ -994,7 +994,13 @@ class HyperbolicHeatKernel(GeoUtils):
         return torch.trapezoid(integ, uu, dim=-1)                  # (B, ngrid)
 
     @staticmethod
-    def sample_radial(ts: torch.FloatTensor, d: int, seq_len: int, gaussian_curvature: float=-1.0) -> torch.FloatTensor:
+    def sample_radial(
+        ts: torch.FloatTensor,
+        d: int,
+        seq_len: int,
+        gaussian_curvature: float=-1.0,
+        exact_d3: bool=False,
+    ) -> torch.FloatTensor:
         """Sample `seq_len` radial coordinates per heat time from the `H^d` heat-kernel
         marginal `pi(rho) ∝ sinh^{d-1}(rho) p_H(rho; t)` (generator `½ Δ`).
 
@@ -1015,6 +1021,9 @@ class HyperbolicHeatKernel(GeoUtils):
             ts (`torch.FloatTensor` of shape `(batch_size,)`): heat times `> 0`.
             d (`int`): hyperbolic dimension `>= 2`.
             seq_len (`int`): samples per heat time.
+            exact_d3 (`bool`, *optional*, defaults to `False`): for `d == 3` only,
+                invert the closed-form CDF instead of the quadrature grid. Exact
+                and free of the `_radial_t_max` ceiling.
             gaussian_curvature (`float`, *optional*, defaults to `-1.0`):
                 Gaussian (sectional) curvature `K < 0`, setting the model radius
                 `R = 1/sqrt(|K|)`. `rho` is intrinsic (a geodesic distance), so it
@@ -1040,9 +1049,75 @@ class HyperbolicHeatKernel(GeoUtils):
         if B == 0:
             return ts.new_empty(0, seq_len)
         R = GeoUtils._curvature_scale(gaussian_curvature)
+        if exact_d3:
+            if d == 3:
+                return R * HyperbolicHeatKernel._sample_radial_exact_d3(ts / (R * R), seq_len)
         rho, cdf = HyperbolicHeatKernel.radial_cdf(ts / (R * R), d)
         u = torch.rand(B, seq_len, dtype=ts.dtype, device=ts.device)
         return R * HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u)
+
+    @staticmethod
+    def _radial_cdf_exact_d3(rhos: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
+        r"""Closed-form CDF of the unit-`H^3` radial marginal.
+
+        `pi(rho) ∝ sinh^2(rho) p_3(rho;t) = rho sinh(rho) e^{-rho^2/2t}` on
+        `rho > 0`. Splitting `sinh` turns it into a difference of the `N(+-t, t)`
+        densities, `pi(rho) = rho [phi_+(rho) - phi_-(rho)] / t` (the normaliser
+        is exactly `E[N(t,t)] = t`), and `int_0^rho s phi(s) ds` is elementary:
+
+            F(rho) = Phi(a) - Phi(-b) + (varphi(b) - varphi(a)) / sqrt(t),
+            a = (rho - t)/sqrt(t),   b = (rho + t)/sqrt(t).
+
+        `Phi(a) - Phi(-b)`, not the algebraically equal `Phi(b) - Phi(-a)`:
+        `-b < a` always, so the subtracted term is the small one and the
+        difference never cancels.
+
+        Args:
+            rhos (`torch.Tensor`): radial coordinates `>= 0`.
+            ts (`torch.Tensor`): heat times `> 0`, broadcastable against `rhos`.
+
+        Returns:
+            `torch.Tensor`: `F(rho) in [0, 1]`, same broadcast shape.
+        """
+        st = ts.sqrt()
+        a = (rhos - ts) / st
+        b = (rhos + ts) / st
+        norm = 1.0 / math.sqrt(2.0 * math.pi)
+        pdf_b = norm * torch.exp(-0.5 * b * b)
+        pdf_a = norm * torch.exp(-0.5 * a * a)
+        return (
+            torch.special.ndtr(a) - torch.special.ndtr(-b) + (pdf_b - pdf_a) / st
+        ).clamp(0.0, 1.0)
+
+    _EXACT_D3_BISECT: int = 48
+
+    @staticmethod
+    def _sample_radial_exact_d3(ts: torch.FloatTensor, seq_len: int) -> torch.FloatTensor:
+        """Exact `H^3` radial sampler: inverse of `_radial_cdf_exact_d3` by bisection.
+
+        No quadrature and no grid, so unlike `radial_cdf` it has no
+        `_radial_t_max` ceiling -- the marginal is never formed in linear space.
+        The bracket `[0, t + 14 sqrt(t)]` holds both regimes (`rho ~ sqrt(t)
+        chi_3` as `t -> 0`, `rho ~ N(t, t)` as `t -> inf`), and 48 halvings take
+        it to ~1e-14 of it, below float64's reach on `rho`.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`): heat times `> 0`.
+            seq_len (`int`): samples per heat time.
+
+        Returns:
+            `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples `>= 0`.
+        """
+        tcol = ts.unsqueeze(-1)
+        u = torch.rand(ts.shape[0], seq_len, dtype=ts.dtype, device=ts.device)
+        lo = torch.zeros_like(u)
+        hi = (tcol + 14.0 * tcol.sqrt()).expand_as(u).contiguous()
+        for _ in range(HyperbolicHeatKernel._EXACT_D3_BISECT):
+            mid = 0.5 * (lo + hi)
+            below = HyperbolicHeatKernel._radial_cdf_exact_d3(mid, tcol) < u
+            lo = torch.where(below, mid, lo)
+            hi = torch.where(below, hi, mid)
+        return 0.5 * (lo + hi)
 
     @staticmethod
     def radial_cdf(ts: torch.FloatTensor, d: int) -> tuple[torch.Tensor, torch.Tensor]:
