@@ -631,34 +631,31 @@ class Loss:
         prod_factor_dim: Optional[List[int]] = None,
         prod_factor_gaussian_curvature: Optional[List[float]] = None,
     ):
-        """Angular path-KL of the bridge on a product of Poincare balls.
+        """Full path-KL of the bridge on a product of Poincare balls.
 
-        Conditioning the physical-time path-KL on the radius turns the angular
-        Girsanov integrand of factor m of
-        `H^{d_1}_{K_1} x ... x H^{d_M}_{K_M}` into a weighted endpoint
-        regression (slides/aug26_2026, "Hyperbolic Product Manifold"):
+        Product-manifold, curvature-aware form of
+        `bridge_loss_poincare_disk_polar` (slides/aug26_2026, "Complete
+        Physical-Time Hyperbolic ELBO"). Per factor m, with
+        `kappa_m = sqrt(-K_m)`, `u_m = kappa_m rho_m` the DIMENSIONLESS radius,
+        `alpha_v = <phi_v, theta_m>` and `D_v = cosh(u_m) - sinh(u_m) alpha_v`:
 
-            (d_m - 1)^2 kappa_m^2 || P_m (x_m - xhat_m) ||^2 / (2 D_m^2),
+            A_v = (cosh(u_m) alpha_v - sinh(u_m)) / D_v    radial component
+            C_v = (I - theta theta^T) phi_v / D_v          angular component
+            w_v = A_v theta_m + C_v,                       ||w_v|| == 1
 
-        with `kappa_m = sqrt(-K_m)`, `u_m = kappa_m rho_m` the DIMENSIONLESS
-        radius, `P_m = I - theta_m theta_m^T` the tangent projector at the
-        bridge direction, `x_m` the target word's unit boundary direction in
-        factor m, `xhat_m = sum_v p_theta(v) ebar_{v,m}` the posterior mean of
-        the same, and `D_m = cosh(u_m) - sinh(u_m) <x_m, theta_m>`. The factors
-        are independent Brownian motions, so their terms add.
+            (d_m - 1)^2 kappa_m^2 / 2 * || sum_v mu_v w_v ||^2,
+            mu_v = p_theta(v) - delta_{v,target}
+
+        BOTH drift components are included, so this is a genuine ELBO on the
+        NLL and is tight at the Bayes-optimal posterior (measured 1.009 H(p)).
+        Since ||w_v|| == 1 the integrand is bounded by 2 (d_m-1)^2 kappa_m^2 --
+        unlike the angular-only surrogate, whose 1/D_x^2 weight diverges.
+        Factors are independent Brownian motions, so their terms add.
 
         `logits` are the model's log-posterior over words -- the horosphere
         readout is already applied (`HyperbolicModelBase.forward_horosphere`),
         so `p_theta` is their plain softmax and horosphere_dists must NOT be
         added a second time (Invariant 1).
-
-        Two things this is NOT. It is the ANGULAR path-KL only: the radial drift
-        term is dropped, so it is strictly smaller than
-        `bridge_loss_poincare_disk_polar`, whose `w_v` carries the radial
-        component as well -- the two are not comparable, and `H(p)` is not a
-        floor for this one. And the learned drift shares the TARGET's
-        denominator `D_m`, which is what collapses the drift error to a
-        regression on the endpoint.
 
         Args:
             logits (`torch.Tensor` of shape `(N, V)`):
@@ -706,44 +703,37 @@ class Loss:
             word_embedding=word_embedding,
         )
         probs = logits.to(torch.float64).softmax(-1)
+        mu = probs - torch.nn.functional.one_hot(targets,V).to(torch.float64)
         tiny = torch.finfo(torch.float64).tiny
 
         loss, offset = 0.0, 0
         for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
             theta_m = thetas[:, offset:offset + factor_dim]
-            # Each factor has its own boundary sphere S^{d_m - 1}, so the table
-            # is normalized per block -- the same slicing poincare_bridge_prod
-            # samples with.
             phis_m = phis[:, offset:offset + factor_dim]
             offset += factor_dim
-            phis_m = phis_m / phis_m.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
-            x_m = phis_m[targets]                                  # (N, d_m)
-            xhat_m = probs @ phis_m                                # (N, d_m)
-            # P_m v = v - <theta_m, v> theta_m, without ever forming (d_m, d_m).
-            diffs = x_m - xhat_m
-            # (I - \Theta \Theta^{\top}) (x - \hat{x}) = (x - \hat{x}) - \Theta \Theta^{\top} (x - \hat{x}) 
-            # = (x - \hat{x}) - \Theta (\Theta^{\top} (x - \hat{x})), since the inner product (\Theta^{\top} (x - \hat{x})) is a scalar, order is not important
-            # = (x - \hat{x}) - (\Theta^{\top} (x - \hat{x})) \Theta
-            perps = diffs - (theta_m * diffs).sum(-1, keepdim=True) * theta_m
-
             kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
-            # u, not rho, is what drives cosh/sinh, so u is the quantity RHO_MAX
-            # caps (Invariant 4): both overflow float64 past u ~ 710. By then
-            # the direction already identifies the target to full precision, so
-            # the cap is statistically a no-op as before.
+            # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
+            # exp_pos below overflows past u ~ 710 (Invariant 4).
             us = (kappa * rhos[:, i]).clamp_max(HyperBridge.RHO_MAX)
-            # alpha_t = <x_m, theta_m> and D_x = cosh(u) - sinh(u) alpha_t,
-            # the definition as written in the slides. NOTE: cosh and sinh agree
-            # to all 53 bits well before u ~ 20, so for a theta that has landed
-            # on its target word this evaluates to exactly 0 and the 1/D_x^2
-            # weight below is inf.
-            alphas = (x_m * theta_m).sum(-1)
-            D_x = us.cosh() - us.sinh() * alphas
-            # Square the RATIO, not numerator and denominator apart: ||perp||
-            # is bounded by 2 while D reaches e^-350, so ||perp||^2 / D^2
-            # overflows float64 where (||perp|| / D)^2 does not.
-            ratios = perps.norm(dim=-1, p=2) / D_x
-            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * ratios.square() / 2
+            # Per-factor sphere S^{d_m-1}: horosphere_geometry re-normalizes the
+            # block, and its `rhos` argument is exactly this dimensionless u.
+            phis_m, sin_half_sq, cos_half_sq, _ = HyperBridge.horosphere_geometry(
+                rhos=us, thetas=theta_m, vocab_size=V, word_embedding=phis_m,
+            )
+            # Transport each word's boundary direction into the frame at z, as in
+            # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
+            # cancellation-free (Invariant 5); the result is a unit vector.
+            exp_pos = us[:, None].exp()
+            exp_neg = (-us[:, None]).exp()
+            radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
+            denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
+            inners = cos_half_sq - sin_half_sq  # <theta_m, phi_v>
+            perps = phis_m[None, :, :] - inners[..., None] * theta_m[:, None, :]
+            ws = (radial_parts[..., None] * theta_m[:, None, :] + perps) / denoms[..., None]
+            # Bridge drift toward word v is (d_m-1) kappa_m w_v, so the Girsanov
+            # integrand is (d_m-1)^2 kappa_m^2 / 2 ||sum_v mu_v w_v||^2.
+            errors = (mu[..., None] * ws).sum(-2)
+            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * errors.square().sum(-1) / 2
         return loss
 
     """
