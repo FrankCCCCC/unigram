@@ -32,6 +32,7 @@ depth: 3
 # own horosphere readout all read, so this freezes the geometry as well as the
 # readout -- there is no "pinned angles, trainable head" split here.
 trainable_word_embedding: true
+forward_type: horosphere
 unif_word_embedding: false
 flow_path: hyperbolic_boundary
 hyper_dt: 0.01

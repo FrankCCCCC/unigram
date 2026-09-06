@@ -238,7 +238,20 @@ class HyperbolicModelBase(nn.Module, ABC):
         if z is not None:
             input = z
         else:
-            input = torch.cat([theta, radius], dim=-1)
+            # The TRUNK is fed the dimensionless radius u = kappa*rho, so the
+            # predictor is scale-equivariant (the Bayes posterior depends on
+            # (theta, u), not on rho). horosphere_geometry below still receives
+            # the intrinsic radius and applies kappa itself -- rescaling here
+            # only, so the curvature is never applied twice.
+            _, curvatures = self.prod_factors(
+                prod_factor_dim=self.prod_factor_dim,
+                prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+                embedding_size=theta.shape[-1],
+            )
+            kappas = radius.new_tensor(
+                [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+            )
+            input = torch.cat([theta, radius * kappas], dim=-1)
 
         output = self.model_forward(z=input, t=t)
         # The trunk emits the boundary features first and the radial channels
@@ -562,8 +575,11 @@ class MLPLMRefactor(HyperbolicModelBase):
             `torch.Tensor` of shape `(batch_size, max_seq_len, output_theta_dim + output_radial_dim)`:
                 Boundary features followed by the radial channels.
         """
+        # t is optional: given (theta, u) the Bayes posterior needs no time
+        # (OptimalModelRefactor ignores t outright), and conditioning on the
+        # physical t would break scale-equivariance. None => constant channel.
         if t is None:
-            raise ValueError("MLPLMRefactor is time-conditioned; t is required.")
+            t = torch.zeros(z.shape[0], dtype=z.dtype, device=z.device)
         if z.ndim != 3 or z.shape[1] != self.max_seq_len:
             raise ValueError(
                 f"z must have shape (batch_size, {self.max_seq_len}, channels); "

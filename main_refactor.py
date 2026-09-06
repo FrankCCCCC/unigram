@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import hydra
 import lightning as L
@@ -148,7 +148,6 @@ class HyperbolicDLMRefactor(BaseTrainer):
             prod_factor_dim=self.prod_factor_dim,
             prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
         )
-
         # The horosphere readout returns the FULL log-posterior (the geometry is
         # already added), which is what the *_refactor losses consume -- they do
         # not add horosphere_dists again. Axis 1 is the sequence.
@@ -156,8 +155,8 @@ class HyperbolicDLMRefactor(BaseTrainer):
             z=None,
             theta=thetas,
             radius=rhos,
-            t=ts,
-            forward_type="horosphere",
+            t=None,
+            forward_type=self.config.forward_type,
         ).squeeze(1)
         return logits, ts, rhos.squeeze(1), thetas.squeeze(1), proposal_weight
 
