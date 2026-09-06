@@ -897,3 +897,82 @@ indistinguishable from 20k/40k/200k.
 
 **Not yet known.** `c1e4_exp1.0` (V = 10⁴) is ~26 % done and lopsided (115/168 at d=3,
 14/168 at d=9, 1/168 at d=16), so no vocabulary-scaling claim at d ≥ 9 is available yet.
+
+---
+
+## `c1e4_exp1.0` (COMPLETE) — 504/504 cells; campaign 2016/2016, 2026-09-03
+
+**What the finished campaign establishes.** All 2016 cells are present (168 per (ps, d)).
+The two new targets were meant to test vocabulary scaling at fixed `H` — **measured: they
+do not.** `_exp_decay_ps` gives `p_i ∝ e^-i` at V = 10³ and 10⁴ with identical
+`H` = 1.040652 and the *same* 16 non-zero counts, so
+`torch.equal(c1e3.tokens, c1e4.tokens)` is **True**; the contrast varies only the count of
+never-observed normalizer rows (984 vs 9984), at identical tokens and draws. So read, the
+bridge is unmoved: paired per-cell `wnelbo_ref_std` ratio 0.999 / 1.020 / 1.011 at
+d = 3/9/16, against a 7.5× rise *across* d (medians 5.53 → 21.04 → 41.41). At d = 9, c1e4
+is worse by a paired +0.0066 nats — real (12/12 shared-draw groups positive, cluster
+p = 0.0099, **not** the 1.3e-5 an unclustered t-test reports) but shrinking 6× with budget,
++0.0132 (20k) → +0.0022 (200k); *inferred* to be undertrained normalizer rows, not a looser
+bound.
+
+### Best margin over `H` (3-seed mean ± sd; argmin over 56 cells, so biased low)
+
+| ps (H, V) | d = 3 | d = 9 | d = 16 |
+|---|---|---|---|
+| naive (0.500288, 10) | −0.00249 ± 0.00205 | −0.00698 ± 0.00996 | −0.00741 ± 0.01345 |
+| c1e3 (1.040652, 10³) | −0.00013 ± 0.00042 | −0.00636 ± 0.00531 | +0.00248 ± 0.00811 |
+| c1e4 (1.040652, 10⁴) | +0.00041 ± 0.00260 | −0.00242 ± 0.00547 | +0.00469 ± 0.03130 |
+| cmplx (1.666363, 10) | −0.00195 ± 0.00399 | −0.00817 ± 0.00490 | +0.00672 ± 0.02184 |
+
+Nine of twelve are within ±0.5 % of `H` (exceptions: naive d=9/d=16 and c1e3 d=9, at
+−1.39/−1.48/−0.61 %). Honest leave-one-seed-out margins on c1e4 (ce/pp): 3d
+**+0.0068/+0.0078** ±0.003, 9d **+0.0080/+0.0035** ±0.002–0.007, 16d **+0.0143/+0.0536**
+±0.03–0.04 — unusable. The below-`H` 9d pp cell vanishes under LOSO.
+
+### Why medians at d = 16: one draw in 4 × 10⁶ moves a pooled mean 0.42 nats
+
+16d/pp/40k mean `wnelbo_ref` = **1.4710**, median **1.0551**. Five cells (all seed 2,
+q ∈ {0.1…1.0}) carry 98.9 % of the gap, each reconstructing to `k_eff` = 1.02–1.21: one,
+possibly two, of 4 × 10⁶ draws. Worst is 5.470716 with std 8747.320, yet its unweighted
+`nelbo_ref` = 0.104529 sits inside the group (median 0.101610) and its `wloss` is the group
+median exactly. All 43 cells campaign-wide above 5× their (d, geom, rate) std baseline are
+d = 16, 37 in three (seed, steps) buckets — `trainer.py:44-51` seeds the test draw from
+(seed, global_step, batch_idx, stage) only, so **168 cells share one byte-identical `t`
+vector**; against the `loss.py:395` clamp (`_radial_t_max` 96.96 / 5.64 / **1.51**;
+0.006 / 57 / **86 %** clamped) with an unclamped `exp(0.1t)/0.1` weight, this is an
+estimator artifact. Dropping the five puts 16d/pp at 1.0743 / 1.0595 / 1.0619 / 1.0616.
+**But** 16d/**ce** has no 5× cell and its mean still beats its median (100k 1.0963 vs
+1.0759): quote medians, not means after outlier removal.
+
+### CE / ELBO decoupling
+
+`wce_ref` for CE-trained c1e4 cells: d = 3 0.944 → 0.908 across budgets; d = 9 ~0.051 and
+d = 16 ~0.015, both flat. The `(d−1)/2` drift identifies the word immediately, so denoising
+CE carries no signal at high d while the polar ELBO still sits above `H`. CE beats PP at
+d = 3 (12/12 draw-groups, +0.0092, p = 0.0005), but that gap closes monotonically (+0.0163
+at 20k → +0.0063 at 200k) while 3d pp is still training (`ce_ref` 3.34 → 1.43 from 40k to
+200k), so "pp worse" is not separable from "pp slower"; at d = 9/16 the geometries are
+indistinguishable (p = 0.30, 0.47). Nor is c1e4 converged at 40k: `nelbo_ref` still falls
+−0.00117 from 40k to 200k (12/18 down, p = 0.030) where `wnelbo_ref` sees nothing
+(p = 0.799).
+
+### Below-`H` invariant — final census
+
+437/2016 runs read below `H` (21.7 %); 8 at z < −2, **none** past −3, worst −2.51 — less
+extreme than the −2.63 expected from 144 independent draws. c1e4 alone: 61/504, worst
+−1.86; all 12 (d, ps) shared-draw group means sit above `H` (t = +1.94…+6.70). **No leak**,
+with two qualifications: the clamp biases `wnelbo_ref` high, making this a *conservative*
+test (46 runs at z < −2 expected under a symmetric null, 8 seen); and split by geometry,
+(d = 3, naive, ce) sits below `H` at −0.15 % (t = −1.91, 8/12 groups below) — 1 of 24 arms,
+chance expectation, but the most sensitive arm, and pooling hides it.
+
+### Unresolved / to fix
+
+1. `loss.py:395` — recompute `proposal_weight` from the clamped `t`, or truncate the
+   reference proposal at `_radial_t_max`. Until then d = 16 numbers bound an estimator, not
+   a model.
+2. `trainer.py:44-51` — seed the test generator per run; one draw shared by 168 cells gives
+   ICC 0.14–0.21 and n_eff ≈ 45–60.
+3. **No vocabulary result exists yet**: `e^-i` has 16-token support at any V.
+4. **d = 16 unsolved**; whether the d = 9 residual is model or estimator is undecidable at
+   57 % clamped draws. Both wait on (1).
