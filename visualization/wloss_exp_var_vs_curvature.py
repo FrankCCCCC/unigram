@@ -27,14 +27,16 @@ weighted denoising cross-entropy, which has no distribution-only limit: measured
 here it scales as `R^2 = 1/|K|` to within 0.8% over four decades, drawn as a
 guide.
 
-Two different "variances" are defensible, so both are available:
+Both plotted statistics match RESULTS.md's `mean / variance` cells:
 
-  --variance sample  (default)  mean over seeds of `test_wloss_std**2` -- the
-                     per-sample variance of the estimator, from 4e6 test draws
-                     per run. This is the one that carries the cliff physics.
-  --variance seed    variance across the 3 seeds of `test_wloss` -- what the
-                     `avg +- std` cells of RESULTS.md report. Three samples, so
-                     it is noisy; use it only to read RESULTS.md's own spread.
+  expectation  mean over seeds of `test_wloss`.
+  variance     mean over seeds of `test_wloss_std**2`: the point estimate of
+               per-sample variance from each run's 4e6 test draws, in nats^2.
+
+Each statistic is averaged separately across the 3 seeds. Variance is never
+computed across seed means. Expectation error bars remain the single-run
+Monte Carlo standard error, sqrt(averaged per-sample variance / 4e6), rather
+than the standard error of the three-seed average.
 
 Curvature enters through the radius `R = 1/sqrt(-K)`: `main_refactor.py` clamps
 the heat time at `_radial_t_max(3) * R^2`, and the per-`t` loss decays ~R^2 times
@@ -66,7 +68,7 @@ there is one source of truth for it too.
 
 Outputs:
   <out-dir>/wloss_mean_{pp,ce}_{ps}.png
-  <out-dir>/wloss_variance_{pp,ce}_{ps}[_seedvar].png
+  <out-dir>/wloss_variance_{pp,ce}_{ps}.png
 
 CPU-only, but run it on a compute node.
 
@@ -127,19 +129,17 @@ def collect(project: str, ps: str):
           sorted(rates, key=lambda q: float(q[3:])))
 
 
-def statistic(runs: list, stat: str, kind: str):
+def statistic(runs: list, stat: str):
   """(value, half-error-bar) of wloss for one cell."""
   if stat == 'mean':
     # Error bar is the estimator's own standard error, not the seed spread:
     # each run averages 4e6 draws, so this is what the mean is worth.
-    return (statistic(runs, 'mean_only', kind),
-            statistic(runs, 'variance', 'sample') ** 0.5 / TEST_SIZE ** 0.5)
+    return (statistic(runs, 'mean_only'),
+            statistic(runs, 'variance') ** 0.5 / TEST_SIZE ** 0.5)
   if stat == 'mean_only':
     return statistics.mean(r['test_wloss'] for r in runs)
-  if kind == 'sample':
-    # test_wloss_std is the pooled per-sample std over the 4e6-draw test pass.
-    return statistics.mean(r['test_wloss_std'] ** 2 for r in runs)
-  return statistics.variance([r['test_wloss'] for r in runs]) if len(runs) > 1 else float('nan')
+  # test_wloss_std is the pooled per-sample std over the 4e6-draw test pass.
+  return statistics.mean(r['test_wloss_std'] ** 2 for r in runs)
 
 
 def _spread_labels(ax, ends, x, side: str = 'right', min_gap_px: float = 12.0) -> None:
@@ -173,7 +173,7 @@ def _spread_labels(ax, ends, x, side: str = 'right', min_gap_px: float = 12.0) -
                   shrinkA=2, shrinkB=1))
 
 
-def plot(cells, ks, rates, lg, ps, stat, kind, out) -> str:
+def plot(cells, ks, rates, lg, ps, stat, out) -> str:
   fig, ax = plt.subplots(figsize=(9.4, 5.8))
   fig.patch.set_facecolor('white'); ax.set_facecolor('white')
   xs = [abs(float(k)) for k in ks]
@@ -184,7 +184,7 @@ def plot(cells, ks, rates, lg, ps, stat, kind, out) -> str:
 
   ends = []
   for i, (q, lam) in enumerate(zip(rates, lams)):
-    got = [(x, statistic(cells[(lg, k, q)], stat, kind))
+    got = [(x, statistic(cells[(lg, k, q)], stat))
            for x, k in zip(xs, ks) if (lg, k, q) in cells]
     if not got:
       continue
@@ -216,7 +216,7 @@ def plot(cells, ks, rates, lg, ps, stat, kind, out) -> str:
                 fontsize=9.5, fontweight='medium')
   if stat == 'mean' and lg == 'ce':
     # Measured: the weighted CE integral is proportional to R^2 = 1/|K|.
-    anchor = statistic(cells[(lg, ks[-1], rates[0])], 'mean_only', kind)
+    anchor = statistic(cells[(lg, ks[-1], rates[0])], 'mean_only')
     ax.plot(xs, [anchor * xs[-1] / x for x in xs], color=REF, linewidth=1.5,
             linestyle=(0, (5, 4)), zorder=2)
     ax.annotate('$\\propto R^2 = 1/|K|$', (xs[0], anchor * xs[-1] / xs[0]),
@@ -234,8 +234,7 @@ def plot(cells, ks, rates, lg, ps, stat, kind, out) -> str:
     what = ('negative ELBO estimate' if lg == 'pp' else 'weighted CE integral')
     ylab = f'E[wloss]   ({what}, nats)' + ('' if linear_y else '   (log scale)')
   else:
-    ylab = (('per-sample variance of wloss' if kind == 'sample'
-             else 'across-seed variance of mean wloss') + '   (log scale)')
+    ylab = 'per-sample variance of wloss (averaged across seeds)   (log scale)'
   ax.set_ylabel(ylab, fontsize=11, color=INK)
   ax.set_xlabel('Gaussian curvature $K$   '
                 '(flatter, $R^2=1/|K|$ large $\\leftarrow$   $\\rightarrow$ sharper)',
@@ -292,9 +291,6 @@ def main():
   p.add_argument('--project', default='init_opt_test_3d_refactor_new')
   p.add_argument('--ps', default='c1e4_exp1.0')
   p.add_argument('--stat', choices=['mean', 'variance', 'both'], default='both')
-  p.add_argument('--variance', choices=['sample', 'seed'], default='sample',
-                 help='sample: mean of test_wloss_std**2 (default). '
-                      'seed: variance of test_wloss across seeds, as in RESULTS.md')
   p.add_argument('--out-dir', default=None,
                  help='default experiments/{project}/imgs')
   args = p.parse_args()
@@ -307,14 +303,12 @@ def main():
 
   stats = ['mean', 'variance'] if args.stat == 'both' else [args.stat]
   for stat in stats:
-    # the sample/seed distinction only exists for the variance
-    suffix = '' if (stat == 'mean' or args.variance == 'sample') else '_seedvar'
     for lg in GEOMETRIES:
       if not any(key[0] == lg for key in cells):
         print(f'  [skip] no {lg} runs for ps={args.ps}')
         continue
-      out = os.path.join(out_dir, f'wloss_{stat}_{lg}_{args.ps}{suffix}.png')
-      print(f'wrote {plot(cells, ks, rates, lg, args.ps, stat, args.variance, out)}')
+      out = os.path.join(out_dir, f'wloss_{stat}_{lg}_{args.ps}.png')
+      print(f'wrote {plot(cells, ks, rates, lg, args.ps, stat, out)}')
 
 
 if __name__ == '__main__':
