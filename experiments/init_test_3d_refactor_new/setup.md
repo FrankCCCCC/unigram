@@ -14,7 +14,7 @@
 
 ### Training
 - ``hyper_dim``: 3
-- ``gaussian_curvature``: {-1.0, -10.0, -0.01}
+- ``gaussian_curvature``: {-1.0, -2.0, -3.0, -4.0, -10.0, -0.5, -0.1, -0.05, -0.01}
 - ``loss_proposal_type``: {exp}
 - ``loss_proposal_exp_rate``: {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
 - ``loss_geometry``: {``cross_entropy``, ``poincare_polar``}

@@ -18,6 +18,13 @@
 - ``loss_geometry``: {``cross_entropy``, ``poincare_polar``}
 - Product Manifold:
     - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -10.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -0.01, -0.01])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.1, -0.1, -0.1])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-1.0, -1.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-2.0, -2.0, -2.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-3.0, -3.0, -3.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-4.0, -4.0, -4.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-10.0, -10.0, -10.0])
 - ``lr``: 0.001
 - ``max_steps``: {20000}
 - ``gradient_clip_val``: 1.0
