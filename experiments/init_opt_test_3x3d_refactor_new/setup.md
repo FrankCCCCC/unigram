@@ -32,7 +32,8 @@
 
 ### Result Presentation
 
-- Report mean and variance of wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+- Report point-estimate mean and variance of wloss, wnelbo_ref, wce_ref, nelbo_ref, and ce_ref. Report the average of point-estimate mean and variance across 3 seeds.
+
 ---
 
 # Results

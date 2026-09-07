@@ -6,8 +6,18 @@
 Reads every output/{project}/{run_name}/test_metrics.json, parses the swept
 variables back out of {run_name}, and emits the table layout defined in
 experiments/{project}/setup.md: one section per (ps, max_steps), each holding a
-CE table and a Polar-ELBO table, one row per loss proposal, cells reported as
-"avg ± std across seed".
+CE table and a Polar-ELBO table, one row per loss proposal.
+
+Every setup.md's "Result Presentation" asks for the POINT-ESTIMATE mean and
+variance, each averaged across the 3 seeds, so a cell reads "mean / variance":
+
+    mean      avg over seeds of test_<metric>          -- the point estimate
+    variance  avg over seeds of test_<metric>_std**2   -- the PER-SAMPLE variance
+              of the 4e6-draw test pass, in nats^2
+
+Note this is NOT the across-seed spread the tables used to print: that was a
+3-sample std of the mean, smaller by a factor of ~sqrt(4e6) and squared. The two
+are related by  across-seed std ~= sqrt(variance / test_size).
 
 The headline metric is wnelbo_ref: the poincare-polar ELBO measured on the
 reference pass, whose proposal is pinned to exp(0.1) for every cell, so it is
@@ -39,14 +49,21 @@ ENTROPY = {"naive_ps": 0.500288, "cmplx_ps": 1.666363, "cmplx_ps1": 2.298544,
 # (measured: L(t) ~ exp(-0.152 t), so the cliff sits at 2*0.152).
 VARIANCE_CLIFF = 0.304
 
-# setup.md column order -> key in test_metrics.json
+# setup.md column order -> (mean key, per-sample std key or None).
+# trainer.BaseTrainer.STD_KEYS records a std for the three WEIGHTED quantities
+# only, so the unweighted nelbo_ref / ce_ref have no per-sample variance in any
+# existing run. Their variance renders as "n/r" rather than being dropped.
 COLUMNS = [
-    ("wloss", "test_wloss"),
-    ("wnelbo_ref", "test_wnelbo_ref"),
-    ("wce_ref", "test_wce_ref"),
-    ("nelbo_ref", "test_nelbo_ref"),
-    ("ce_ref", "test_ce_ref"),
+    ("wloss", "test_wloss", "test_wloss_std"),
+    ("wnelbo_ref", "test_wnelbo_ref", "test_wnelbo_ref_std"),
+    ("wce_ref", "test_wce_ref", "test_wce_ref_std"),
+    ("nelbo_ref", "test_nelbo_ref", None),
+    ("ce_ref", "test_ce_ref", None),
 ]
+# Draws behind each run's *_std, from setup.md's test_size. Only used to explain
+# the relation to the old across-seed spread in the header note.
+TEST_SIZE = 4_000_000
+NOT_RECORDED = "n/r"
 GEOMETRY_TITLE = [("ce", "CE"), ("pp", "Polar ELBO")]
 # Dense table: one wloss column per loss_geometry. NELBO and CE are both wloss,
 # measured with loss_geometry set to poincare_polar / cross_entropy.
@@ -76,7 +93,11 @@ def rate_of(q: str) -> float:
 
 
 def collect(project: str):
-    """(ps, k, steps, lg, q) -> {metric_label: [values across seeds]}"""
+    """(ps, k, steps, lg, q) -> {label: {"mean": [...], "var": [...]}}
+
+    One entry per seed in each list; "var" is empty for metrics whose runs
+    recorded no per-sample std.
+    """
     root = REPO_DIR / "output" / project
     cells: dict[tuple, dict[str, list[float]]] = {}
     ps_seen, k_seen, steps_seen, missing, unparsed = [], [], set(), 0, []
@@ -92,10 +113,14 @@ def collect(project: str):
         data = json.load(f.open())
         key = (m["ps"], m["k"], int(m["st"]), m["lg"], m["q"])
         bucket = cells.setdefault(key, {})
-        for label, metric_key in COLUMNS:
+        for label, metric_key, std_key in COLUMNS:
+            slot = bucket.setdefault(label, {"mean": [], "var": []})
             value = data.get(metric_key)
             if value is not None and math.isfinite(value):
-                bucket.setdefault(label, []).append(float(value))
+                slot["mean"].append(float(value))
+            std = data.get(std_key) if std_key else None
+            if std is not None and math.isfinite(std):
+                slot["var"].append(float(std) ** 2)
         if m["ps"] not in ps_seen:
             ps_seen.append(m["ps"])
         if m["k"] not in k_seen:
@@ -104,24 +129,26 @@ def collect(project: str):
     return cells, ps_seen, k_seen, sorted(steps_seen), missing, unparsed
 
 
-def fmt(values: list[float] | None, n_expected: int) -> str:
-    if not values:
+def fmt(slot: dict | None, n_expected: int) -> str:
+    """"mean / variance", each averaged across seeds (setup.md)."""
+    if not slot or not slot["mean"]:
         return "-"
-    if len(values) == 1:
-        return f"{values[0]:.4f} (n=1)"
-    cell = f"{statistics.mean(values):.4f} ± {statistics.stdev(values):.4f}"
-    return cell if len(values) >= n_expected else f"{cell} (n={len(values)})"
+    means = slot["mean"]
+    var = f"{statistics.mean(slot['var']):.4g}" if slot["var"] else NOT_RECORDED
+    cell = f"{statistics.mean(means):.4f} / {var}"
+    return cell if len(means) >= n_expected else f"{cell} (n={len(means)})"
 
 
 def table(cells, ps: str, k: str | None, steps: int, lg: str,
           rates: list[str], n_expected: int) -> list[str]:
-    header = "| loss Proposal | " + " | ".join(label for label, _ in COLUMNS) + " |"
+    header = "| loss Proposal | " + " | ".join(label for label, _, _ in COLUMNS) + " |"
     lines = [header, "|---" * (1 + len(COLUMNS)) + "|"]
     for q in rates:
         bucket = cells.get((ps, k, steps, lg, q))
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag] + [
-            fmt(bucket.get(label) if bucket else None, n_expected) for label, _ in COLUMNS
+            fmt(bucket.get(label) if bucket else None, n_expected)
+            for label, _, _ in COLUMNS
         ]
         lines.append("| " + " | ".join(row) + " |")
     return lines
@@ -168,7 +195,8 @@ def main() -> None:
     # "geometry fixed by the project name" section.
     k_list.sort(key=lambda x: (x is not None, -float(x) if x is not None else 0.0))
     rates = sorted({key[4] for key in cells}, key=rate_of)
-    n_runs = sum(len(v.get("wnelbo_ref", [])) for v in cells.values())
+    n_runs = sum(len(v["wnelbo_ref"]["mean"]) for v in cells.values()
+                 if "wnelbo_ref" in v)
     total = (len(ps_list) * len(k_list) * len(steps_list)
              * len(GEOMETRY_TITLE) * len(rates) * args.seeds)
 
@@ -182,6 +210,15 @@ def main() -> None:
         if ps in ENTROPY:
             out.append(f"- H({ps}) = **{ENTROPY[ps]:.4f}** — wnelbo_ref is bounded below by this")
     out += [
+        "- Each cell is **`mean / variance`**, both averaged across the 3 seeds, as",
+        "  setup.md's \"Result Presentation\" asks: `mean` is the point estimate",
+        "  (avg of `test_<metric>`), `variance` is the PER-SAMPLE variance of the",
+        f"  {TEST_SIZE:,}-draw test pass in nats² (avg of `test_<metric>_std**2`).",
+        f"- `{NOT_RECORDED}` = not recorded. `trainer.BaseTrainer.STD_KEYS` logs a per-sample",
+        "  std for the three WEIGHTED quantities only, so `nelbo_ref` and `ce_ref` have no",
+        "  variance in any existing run; filling them needs STD_KEYS extended and a re-run.",
+        "- These variances are NOT the `± std` these tables used to print. That was the",
+        f"  across-seed spread of the mean, related by `± ≈ sqrt(variance / {TEST_SIZE:,})`.",
         f"- `!` marks loss proposals above the ~{VARIANCE_CLIFF} variance cliff, where the",
         "  weighted estimator has infinite variance. The reference pass is pinned at",
         "  exp(0.1) and stays valid, but training there is materially noisier.",
@@ -196,7 +233,8 @@ def main() -> None:
         for k in k_list:
             for steps in steps_list:
                 out += ["---", "", section_title(ps, k, steps, multi_step), "",
-                        "Each cell: avg & std across seed", ""]
+                        "Each cell: point-estimate mean / per-sample variance, "
+                        "averaged across 3 seeds", ""]
                 for lg, title in GEOMETRY_TITLE:
                     out += [f"**{title}**", ""]
                     out += table(cells, ps, k, steps, lg, rates, args.seeds)
