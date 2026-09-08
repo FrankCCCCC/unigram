@@ -792,6 +792,46 @@ class Loss:
             reduction='none',
         )
 
+    """
+    Loss of arbitary dimension Poincare Disk, Variational Cross Entropy
+    """
+    @staticmethod
+    def bridge_loss_variational_crossentropy_refactor(logits, targets, rhos, thetas, word_embedding=None):
+        """
+        Denoising cross-entropy of the model's OWN predictive distribution.
+
+        Args:
+            logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(batch_size, seq_len, prod_factor_num)` or `(batch_size, seq_len,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`, *optional*):
+                Boundary table; `None` falls back to the fixed one the bridge
+                uses (`HyperBridge._vocab_angles`).
+        
+        Returns:
+            `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
+        """
+        # F.cross_entropy takes the class axis at dim 1: input (N, C, d1, ...)
+        # against target (N, d1, ...). Passing (batch_size, seq_len, V) directly
+        # would score seq_len as the classes.
+        ce_loss = torch.nn.functional.cross_entropy(
+            logits.to(torch.float64).transpose(1, 2),
+            targets,
+            reduction='none',
+        )
+
+        target_embeddings = word_embedding[targets]
+        pos_exp = torch.exp(rhos)
+        neg_exp = torch.exp(-rhos)
+        a = (target_embeddings * thetas).sum(-1)
+        weight = 1.0 / (((1 - a) / 2 * pos_exp) + ((1 + a) / 2 * neg_exp))
+        return weight * ce_loss
+
     @staticmethod
     def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar", prod_factor_dim=None, prod_factor_gaussian_curvature=None):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
@@ -806,6 +846,14 @@ class Loss:
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
             bridge = Loss.bridge_loss_crossentropy_refactor(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+            )
+        elif loss_geometry == LossGeometry.VAR_CROSS_ENTROPY:
+            bridge = Loss.bridge_loss_variational_crossentropy_refactor(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,
