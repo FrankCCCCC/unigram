@@ -138,11 +138,13 @@ class HyperbolicDLMRefactor(BaseTrainer):
                 f"only suppport ({FlowPath.HYPERBOLIC_BOUNDARY})."
             )
         ts = ts.clamp_max(self.max_heat_time)
-        # rhos: (N, 1, M) one intrinsic radius per factor, thetas: (N, 1, sum(d_i))
-        # the per-factor unit directions concatenated.
+        # rhos: (B, S, M) one intrinsic radius per factor, thetas: (B, S, sum(d_i))
+        # the per-factor unit directions concatenated. ONE heat time per sequence,
+        # not per position: sample_radial(ts, d, seq_len, K) draws seq_len
+        # independent radii from the same t, which is the bridge's contract.
         rhos, thetas = HyperbolicHeatKernel.poincare_bridge_prod(
             ts=ts,
-            targets=targets[:, None],
+            targets=targets,
             word_embedding=word_embedding.to(torch.float64),
             output_coord=Coordinate.HYPERBOLIC_POLAR,
             prod_factor_dim=self.prod_factor_dim,
@@ -157,11 +159,16 @@ class HyperbolicDLMRefactor(BaseTrainer):
             radius=rhos,
             t=None,
             forward_type=self.config.forward_type,
-        ).squeeze(1)
-        return logits, ts, rhos.squeeze(1), thetas.squeeze(1), proposal_weight
+        )
+        # proposal_weight is (B,) -- one t per sequence -- while the losses are
+        # (B, S), so hand it back with the sequence axis it has to broadcast over.
+        return logits, ts, rhos, thetas, proposal_weight[:, None]
 
     def _compute_losses(self, batch: torch.Tensor, batch_idx: int = 0, stage: int = 0):
-        targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
+        # (B, S). The unigram dataset yields one token per example, so S == 1;
+        # reshaping rather than flattening keeps the axis the *_refactor losses
+        # and the model both expect.
+        targets = batch.reshape(batch.shape[0], -1).to(device=self.device, dtype=torch.long)
         batch_size = targets.shape[0]
 
         # Loss Function
