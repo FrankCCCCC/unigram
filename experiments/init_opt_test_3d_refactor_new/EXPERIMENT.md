@@ -24,30 +24,45 @@ Concretely: `wnelbo_ref` here is the numerator of every claim the trained projec
 ## Why curvature should move it
 
 `K` fixes `R = 1/sqrt(-K)`. `main_refactor.py` clamps the heat time to
-`_radial_t_max(3) · R^2 = 97 R^2` — **9.7** at `K = -10`, **97** at `K = -1`, **9700** at
-`K = -0.01` — and the bridge concentrates in the dimensionless `u = rho / R`, so the
+`_radial_t_max(3) · R^2 = 96.96 R^2` — **9.7** at `K = -10`, **97** at `K = -1`, **9696**
+at `K = -0.01` — and the bridge concentrates in the dimensionless `u = rho / R`, so the
 per-`t` loss decays ~`R^2` times more slowly as `K` flattens. The reference proposal is
 pinned at `exp(0.1)` for every cell. The ~0.304 variance cliff measured at `K = -1`
 (`L(t) ~ e^{-0.152 t}`) therefore scales as `1/R^2`:
 
-| `K` | `R^2` | heat-time ceiling | approx. variance cliff | pinned ref rate 0.1 is |
+| `K` | `R^2` | heat-time ceiling | approx. variance cliff | pinned ref rate 0.1, over the cliff |
 |---|---|---|---|---|
-| -10 | 0.1 | 9.7 | ~3.04 | far below the cliff |
-| -1 | 1 | 97 | ~0.304 | below the cliff |
-| -0.01 | 100 | 9700 | ~0.00304 | **~32× above the cliff** |
+| -10 | 0.1 | 9.7 | ~3.04 | 0.03× — far below |
+| -4 | 0.25 | 24.2 | ~1.216 | 0.08× |
+| -3 | 0.33 | 32.3 | ~0.912 | 0.11× |
+| -2 | 0.5 | 48.5 | ~0.608 | 0.16× |
+| -1 | 1 | 97 | ~0.304 | 0.33× |
+| -0.5 | 2 | 194 | ~0.152 | 0.66× — just under |
+| -0.1 | 10 | 970 | ~0.0304 | **3.3× — over** |
+| -0.05 | 20 | 1939 | ~0.0152 | **6.6× — over** |
+| -0.01 | 100 | 9696 | ~0.00304 | **32.9× — over** |
 
-At `K = -0.01` the weighted estimator is still unbiased in expectation but has infinite
+Past the cliff the weighted estimator is still unbiased in expectation but has infinite
 variance, and in a finite sample it under-reports: the mass sits at large `t`, where
 `e^{0.1 t}` is enormous and the proposal essentially never draws.
 
+The cliff crosses the pinned rate at `0.304 / R^2 = 0.1`, i.e. `R^2 = 3.04`,
+**`K ≈ -0.33`**. The original three-curvature grid only bracketed that crossing between
+`K = -1` and `K = -0.01`, two decades apart. The six curvatures `setup.md` adds (-4, -3,
+-2 on the safe side; -0.5, -0.1, -0.05 straddling the crossing) narrow the bracket to
+`K ∈ (-0.5, -0.1)` and turn a yes/no reading into a curve.
+
 ## Hypothesis
 
-1. **`K = -1` and `K = -10`**: `wnelbo_ref` = `H(p)` within the standard error, for all
-   four `ps` specs. (`H(naive_ps) = 0.5003`, `H(cmplx_ps) = 1.6664`,
+1. **`K <= -0.5`** (-10, -4, -3, -2, -1, -0.5): `wnelbo_ref` = `H(p)` within the standard
+   error, for all four `ps` specs. (`H(naive_ps) = 0.5003`, `H(cmplx_ps) = 1.6664`,
    `H(c1e3) = H(c1e4) = 1.0407` nats.)
-2. **`K = -0.01`**: `wnelbo_ref` materially **below** `H(p)`, with a large
-   `wnelbo_ref_std` and an inflated `wce_ref`. This is the estimator failing, not the
-   model — which is exactly the point of running the exact posterior here.
+2. **`K >= -0.1`** (-0.1, -0.05, -0.01): `wnelbo_ref` materially **below** `H(p)`, with a
+   large `wnelbo_ref_std` and an inflated `wce_ref`. This is the estimator failing, not
+   the model — which is exactly the point of running the exact posterior here. The
+   deficit should grow monotonically as `K` flattens, and the transition has to sit
+   between `K = -0.5` and `K = -0.1` if the `1/R^2` cliff scaling is the right
+   explanation. A deficit that turns on well before `K = -0.33` refutes that mechanism.
 3. **Free consistency check**: `wnelbo_ref`, `nelbo_ref`, `wce_ref` and `ce_ref` all come
    from the reference pass, which is pinned to `exp(0.1)` on its own RNG stream
    (`salt=1`) and is independent of `loss_geometry` and `loss_proposal_exp_rate`. They
@@ -56,12 +71,15 @@ variance, and in a finite sample it under-reports: the mass sits at large `t`, w
 
 ## Design
 
-Grid from `setup.md`: 4 × 3 × 7 × 2 × 3 = **504 runs**, one SLURM job each.
+Grid from `setup.md`: 4 × 9 × 7 × 2 × 3 = **1512 runs**, one SLURM job each.
+The first 504 — `K` ∈ {-10, -1, -0.01} — were collected before the six curvatures
+were added; the rest go into the same `output/` tree and the earlier cells are skipped
+by the sweep's `test_metrics.json` idempotency guard.
 
 | variable | values |
 |---|---|
 | `ps` | `naive_ps`, `cmplx_ps`, `c1e3_exp1.0`, `c1e4_exp1.0` |
-| `gaussian_curvature` | -1.0, -10.0, -0.01 |
+| `gaussian_curvature` | -10.0, -4.0, -3.0, -2.0, -1.0, -0.5, -0.1, -0.05, -0.01 |
 | `loss_geometry` | `cross_entropy`, `poincare_polar` |
 | `loss_proposal_exp_rate` | 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0 |
 | `seed` | 0, 1, 2 |
@@ -86,12 +104,19 @@ worth the risk of losing a cell to a slow cold start.
 
 ## Wall clock (expected)
 
-~**14 GPU-h** for the full 504-cell grid — the cheapest of the four projects, and the
-one to read first, since every conclusion the trained projects draw is conditioned on it.
+~**42 GPU-h** for the full 1512-cell grid — ~14 GPU-h already spent on the first three
+curvatures, ~28 GPU-h for the six added ones. Still the cheapest of the four projects, and
+the one to read first, since every conclusion the trained projects draw is conditioned
+on it.
 
 ## Reporting
 
 - `python experiments/report.py init_opt_test_3d_refactor_new` → `RESULTS.md`.
 - The comparison that matters: this project's `wnelbo_ref` vs `H(p)` per `(ps, K)`,
-  then `init_test_3d_refactor_new`'s `wnelbo_ref` vs **this** number.
+  then `init_test_3d_refactor_new`'s `wnelbo_ref` vs **this** number. With nine
+  curvatures, `wnelbo_ref` vs `K` reads as a curve: flat on `H(p)` while the pinned
+  reference rate sits under the cliff, falling away once it does not.
+- The trained twin still sweeps only `K` ∈ {-10, -1, -0.01}, so six of the nine
+  curvatures here have no trained counterpart to pair with — they measure the estimator
+  alone.
 - `experiments/init_opt_test_refactor/RESULTS.md` is the `d = 2`, `K = -1` predecessor.

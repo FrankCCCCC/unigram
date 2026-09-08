@@ -18,6 +18,15 @@
 - ``loss_geometry``: {``cross_entropy``, ``poincare_polar``}
 - Product Manifold:
     - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -10.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -0.01, -0.01])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.05, -0.05, -0.05])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.1, -0.1, -0.1])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.5, -0.5, -0.5])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-1.0, -1.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-2.0, -2.0, -2.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-3.0, -3.0, -3.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-4.0, -4.0, -4.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-10.0, -10.0, -10.0])
 - ``lr``: 0.001
 - ``max_steps``: {20000}
 - ``gradient_clip_val``: 1.0
@@ -32,7 +41,8 @@
 
 ### Result Presentation
 
-- Report mean and variance of wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref |
+- Report point-estimate mean and variance of wloss, wnelbo_ref, wce_ref, nelbo_ref, and ce_ref. Report the average of point-estimate mean and variance across 3 seeds.
+
 ---
 
 # Results

@@ -1,8 +1,8 @@
-# # ELBO for Training Step, Loss Type and Proposal with 3 Seeds Avg
+## ELBO for Training Step, Loss Type and Proposal with 3 Seeds Avg
 
 ---
 
-- Project name: ``init_test_3d_refactor_new``
+- Project name: ``init_opt_test_50x3d_refactor_new``
 - Use ``main_refactor.py`` and scripts ``script/train/ce_redactor.sh`` and ``script/train/pp_refactor.sh``
 
 ### Dataset
@@ -13,18 +13,26 @@
     - ``c1e4_exp1.0``: exp_decay_ps(n=10000, lam=1.0)
 
 ### Training
-- ``hyper_dim``: 3
-- ``gaussian_curvature``: {-1.0, -2.0, -3.0, -4.0, -10.0, -0.5, -0.1, -0.05, -0.01}
 - ``loss_proposal_type``: {exp}
 - ``loss_proposal_exp_rate``: {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
 - ``loss_geometry``: {``cross_entropy``, ``poincare_polar``}
+- Product Manifold (50 components, each has identical curvature):
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-0.01] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-0.05] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-0.1] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-0.5] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-1.0] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-2.0] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-3.0] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-4.0] * 50)
+    - (prod_factor_dim: [3] * 50, prod_factor_gaussian_curvature: [-10.0] * 50)
 - ``lr``: 0.001
 - ``max_steps``: {20000}
 - ``gradient_clip_val``: 1.0
 - ``test_size``: 4000000
 - ``batch_size``: 2048
 - ``seed``: {0, 1, 2}
-- ``mode``: ``tnb``
+- ``mode``: ``opt``
 
 ### Ref ELBO & CE
 - ``ref_proposal_type``: exp
