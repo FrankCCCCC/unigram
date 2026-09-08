@@ -19,6 +19,7 @@ class LossGeometry:
     LORENTZ_CARTESIAN: str = "lorentz_cartesian"
     HORO_CROSS_ENTROPY: str = "horo_cross_entropy"
     CROSS_ENTROPY: str = "cross_entropy"
+    VAR_CROSS_ENTROPY: str = "var_cross_entropy"
 
 @dataclass
 class FlowPath:
@@ -796,9 +797,50 @@ class Loss:
     Loss of arbitary dimension Poincare Disk, Variational Cross Entropy
     """
     @staticmethod
-    def bridge_loss_variational_crossentropy_refactor(logits, targets, rhos, thetas, word_embedding=None):
-        """
-        Denoising cross-entropy of the model's OWN predictive distribution.
+    def bridge_loss_variational_crossentropy_refactor(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Denominator-weighted denoising cross-entropy: an UPPER BOUND on the
+        shared-`D_x` angular path-KL.
+
+        Product-manifold form of slides/aug26_2026, "Weighted CE Upper-Bounds the
+        Hyperbolic Path-KL". With unit boundary rows `e_v`, `x_m = e_{y,m}` and
+        `xhat_m = sum_v p_v e_{v,m}`, the orthogonal projector `P_theta` and
+        `||E^T a||_2 <= ||a||_1` give the embedding bound
+
+            ||P_theta (x_m - xhat_m)||^2 <= ||delta_y - p||_1^2
+                                         <= 2 KL(delta_y || p) = 2 CE(y, p),
+
+        which turns factor m's shared-`D_x` angular rate
+        `(d_m-1)^2 kappa_m^2 / (2 D_{x_m}^2) ||P_theta (x_m - xhat_m)||^2` into a
+        term whose only model-dependent part no longer depends on m. Summing the
+        independent factors therefore factors CE out:
+
+            CE(y, p_theta) * sum_m (d_m - 1)^2 kappa_m^2 / D_{x_m}(u_m, theta_m)^2,
+            D_{x_m} = cosh(u_m) - sinh(u_m) <x_m, theta_m>,   u_m = kappa_m rho_m.
+
+        It bounds the shared-`D_x` ANGULAR SURROGATE, not the ELBO that
+        `bridge_loss_elbo_refactor` evaluates: the surrogate already drops the
+        radial drift error and replaces each endpoint's `D_{e_v}` by the target's
+        `D_x` (slides, "The Shared-D_x Objective Is Only an Angular Surrogate").
+        And unlike that ELBO -- bounded by `2 (d_m-1)^2 kappa_m^2` because
+        `||w_v|| == 1` -- the `1/D_x^2` weight here is unbounded: it grows like
+        `e^{2 u_m}` as the bridge direction closes on the target, so the integral
+        over `t` need not converge. `RHO_MAX` caps `u_m` at
+        `1/D_x^2 <= e^{2 RHO_MAX} ~ 1e304`, which leaves no headroom to sum M of
+        them in linear space, so the whole weight is accumulated in LOG space and
+        exponentiated once.
+
+        `logits` are the model's log-posterior over words -- the horosphere
+        readout is already applied -- so `CE` is their plain cross-entropy
+        against the target and the geometry must NOT be added a second time
+        (Invariant 1).
 
         Args:
             logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
@@ -809,13 +851,37 @@ class Loss:
                 Intrinsic radial coordinate of each product factor.
             thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
                 Per-factor unit boundary directions, concatenated.
-            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`, *optional*):
-                Boundary table; `None` falls back to the fixed one the bridge
-                uses (`HyperBridge._vocab_angles`).
-        
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`):
+                Boundary table. Only the target row is read, and only through
+                its per-factor directions, so the row scale is irrelevant.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension of each factor. Both lists `None` means the single
+                factor `[embedding_dim]` at `[-1.0]`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_m < 0` of each factor.
+
         Returns:
             `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
         """
+        (batch_size, seq_len) = targets.shape
+        assert(logits.shape[:2] == (batch_size, seq_len))
+        V = logits.shape[-1]
+        embedding_size = thetas.shape[-1]
+        assert(thetas.shape == (batch_size, seq_len, embedding_size))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert(tuple(word_embedding.shape) == (V, embedding_size))
+        if rhos.ndim == 2:
+            rhos = rhos[..., None]
+        dims, curvatures = HyperbolicModelBase.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        assert(rhos.shape == (batch_size, seq_len, len(dims)))
+        tiny = torch.finfo(torch.float64).tiny
+
         # F.cross_entropy takes the class axis at dim 1: input (N, C, d1, ...)
         # against target (N, d1, ...). Passing (batch_size, seq_len, V) directly
         # would score seq_len as the classes.
@@ -825,11 +891,62 @@ class Loss:
             reduction='none',
         )
 
-        target_embeddings = word_embedding[targets]
-        pos_exp = torch.exp(rhos)
-        neg_exp = torch.exp(-rhos)
-        a = (target_embeddings * thetas).sum(-1)
-        weight = 1.0 / (((1 - a) / 2 * pos_exp) + ((1 + a) / 2 * neg_exp))
+        phis = word_embedding.to(torch.float64)
+        # Only the TARGET endpoint enters D_x, and only through its per-factor
+        # directions -- so the row scale of `word_embedding` never matters.
+        xs = phis[targets]
+        uniform_dim = dims[0] if len(set(dims)) == 1 else None
+        factor_of_col = torch.repeat_interleave(
+            torch.arange(len(dims), device=thetas.device),
+            torch.tensor(dims, device=thetas.device),
+        )
+
+        def factor_sum(values):
+            """Contract the concatenated boundary axis into one entry per factor.
+
+            A FIXED-ORDER reduction, not `index_add`: the latter is shorter but
+            its CUDA atomics leave the summation order undefined, and this loss
+            turns a 1-ulp wobble in a boundary direction into orders of
+            magnitude -- past `u ~ 37` the bridge direction reaches the target to
+            full float64 precision, so `sin_half_sq` is either exactly 0 (weight
+            `e^{2u}`) or ~1e-32 (weight ~`e^{2u} 1e-32`), and which one it lands
+            on must not depend on the reduction order.
+            """
+            if uniform_dim is not None:
+                return values.unflatten(-1, (len(dims), uniform_dim)).sum(-1)
+            return torch.stack([v.sum(-1) for v in values.split(dims, dim=-1)], dim=-1)
+
+        # Per-factor sphere S^{d_m-1}: a per-factor SLICE of an embedding row is
+        # not unit-norm even when the full row is, and the half-angle identities
+        # below need UNIT x_m.
+        xs = xs / factor_sum(xs.square()).sqrt().clamp_min(tiny)[..., factor_of_col]
+        #   sin^2(a/2) = (1 - <x_m, theta_m>) / 2 = ||theta_m - x_m||^2 / 4
+        #   cos^2(a/2) = (1 + <x_m, theta_m>) / 2 = ||theta_m + x_m||^2 / 4
+        # in the cancellation-free difference form: evaluating 1 - <x_m, theta_m>
+        # directly collapses to 0 once the bridge direction is within ~1e-8 of
+        # the target, and D_x with it (Invariant 5).
+        sin_half_sq = factor_sum((thetas - xs).square()) / 4
+        cos_half_sq = factor_sum((thetas + xs).square()) / 4
+        kappas = thetas.new_tensor(
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+        )
+        # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps
+        # (Invariant 4).
+        us = (kappas * rhos).clamp_max(HyperBridge.RHO_MAX)
+        # log D_x, with e^{+u} pulled out of the log exactly as
+        # horosphere_geometry does: D_x itself spans e^{-u} .. e^{+u}, so forming
+        # it in linear space overflows at u ~ 710 while its log never does. The
+        # clamp keeps the log finite once BOTH terms underflow (u > ~372, where
+        # sin_half_sq is exactly 0 on the target).
+        log_denoms = us + (
+            sin_half_sq + cos_half_sq * (-2 * us).exp()
+        ).clamp_min(tiny).log()
+        # sum_m (d_m-1)^2 kappa_m^2 / D_{x_m}^2, accumulated in log space. Each
+        # summand reaches e^{2 RHO_MAX} ~ 1e304 on its own, so the linear sum has
+        # no headroom left; logsumexp keeps every partial result representable
+        # and exponentiates once, at the end.
+        dim_kappas = thetas.new_tensor([float(factor_dim - 1) for factor_dim in dims]) * kappas
+        weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1).exp()
         return weight * ce_loss
 
     @staticmethod
@@ -859,6 +976,8 @@ class Loss:
                 rhos=rhos,
                 thetas=thetas,
                 word_embedding=word_embedding,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             )
         else:
             raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
