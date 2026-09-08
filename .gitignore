@@ -9,3 +9,4 @@ paper
 slides/
 
 experiments/init_refactor_9d/images/
+!slides/**.md
