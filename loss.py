@@ -1012,6 +1012,7 @@ class Proposal:
         unif_max: float,
         exp_rate: float,
         generator: Optional[torch.Generator] = None,
+        allowed_exp: bool = False,
     ):
         proposal_type = proposal_type.lower()
         interval = float(unif_max - unif_min)
@@ -1039,6 +1040,8 @@ class Proposal:
             density = exp_rate * torch.exp(-exp_rate * (ts - unif_min)) / normalizer
             return ts, density.reciprocal()
         elif proposal_type == HyperBridge.PROPOSAL_EXP_NAME:
+            if not allowed_exp:
+                raise ValueError(f"Set allowed_exp=True to enable regular exp, otherwise, use {HyperBridge.PROPOSAL_STRATIFIED_EXP_NAME}")
             if exp_rate <= 0:
                 raise ValueError("proposal_exp_rate must be > 0")
             if interval == 0:
