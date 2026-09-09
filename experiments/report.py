@@ -173,6 +173,23 @@ def section_title(ps: str, k: str | None, steps: int, multi_step: bool) -> str:
     return f"{title}, Training Step {steps}" if multi_step else title
 
 
+def k_sort_key(k: str | None):
+    """Order the curvature sections flattest -> sharpest.
+
+    A PRODUCT geometry's tag is the `x`-joined curvature vector
+    (`-0.01x-10.0x-1.0`), so sort on the whole vector; a single-manifold tag is
+    the one-element case. `None` -- the geometry is fixed by the project name --
+    keeps its historical position, first. Anything non-numeric sorts last, by
+    name, rather than crashing the report.
+    """
+    if k is None:
+        return (0, (), "")
+    try:
+        return (1, tuple(-float(v) for v in k.split("x")), "")
+    except ValueError:
+        return (2, (), k)
+
+
 def handwritten_tail(dest: Path) -> list[str]:
     """The hand-written trailer of an existing RESULTS.md, so regenerating the
     tables does not silently delete the analysis someone wrote under them."""
@@ -193,7 +210,7 @@ def main() -> None:
     ps_list.sort(key=lambda p: (PS_ORDER.index(p) if p in PS_ORDER else len(PS_ORDER), p))
     # Curvature sections run from flattest to sharpest; None is the single
     # "geometry fixed by the project name" section.
-    k_list.sort(key=lambda x: (x is not None, -float(x) if x is not None else 0.0))
+    k_list.sort(key=k_sort_key)
     rates = sorted({key[4] for key in cells}, key=rate_of)
     n_runs = sum(len(v["wnelbo_ref"]["mean"]) for v in cells.values()
                  if "wnelbo_ref" in v)

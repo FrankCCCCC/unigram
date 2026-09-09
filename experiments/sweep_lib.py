@@ -137,6 +137,10 @@ class Project:
 
     name: str
     mode: str  # "tnb" (train MLPLMRefactor) | "opt" (Bayes-optimal, no fit)
+    # Defaults reproduce the module-level grid/partition, so the four original
+    # projects are unaffected; a project that sweeps a different axis overrides.
+    ps_list: list[str] = field(default_factory=lambda: list(PS_LIST))
+    partition: str = PARTITION
     # Single manifold H^hyper_dim: one run per swept curvature, and the
     # curvature goes in the run name. Product manifold: prod_dim / prod_curvature
     # are hydra list literals, the geometry is fixed and lives in the project
@@ -195,6 +199,15 @@ class Project:
         secs = max(TIME_MARGIN * (STARTUP_SEC + gpu_secs), MIN_LIMIT_SEC)
         h, rem = divmod(int(secs), 3600)
         return f"{h:02d}:{rem // 60:02d}:00"
+
+    def constraint(self, ps: str) -> str | None:
+        """SLURM `--constraint` for this cell, or None.
+
+        Node-name exclusion (below) only covers the nodes `NODE_GPU_GB` knows.
+        A project submitting to a partition wider than `thickstun,desa` gates on
+        the cluster's `gpu-low/gpu-mid/gpu-high` features instead.
+        """
+        return None
 
     def excluded_nodes(self, ps: str) -> str:
         """Nodes whose GPU cannot hold this cell, comma-joined ('' if none)."""
@@ -259,13 +272,13 @@ def main(project: Project, doc: str | None = None) -> None:
                         help="print the plan and one sbatch script; submit nothing")
     parser.add_argument("--limit", type=int, default=None,
                         help="submit at most this many jobs (for a pilot)")
-    parser.add_argument("--ps", nargs="+", default=PS_LIST)
+    parser.add_argument("--ps", nargs="+", default=project.ps_list)
     parser.add_argument("--curvatures", nargs="+", default=None,
                         help="subset of the swept curvatures (single-manifold projects)")
     parser.add_argument("--rates", nargs="+", default=EXP_RATES)
     parser.add_argument("--geometries", nargs="+", default=list(GEOMETRIES))
     parser.add_argument("--seeds", nargs="+", type=int, default=SEEDS)
-    parser.add_argument("--partition", default=PARTITION)
+    parser.add_argument("--partition", default=project.partition)
     parser.add_argument("--force", action="store_true",
                         help="resubmit cells whose test_metrics.json already exists")
     args = parser.parse_args()
@@ -304,6 +317,7 @@ def main(project: Project, doc: str | None = None) -> None:
             time=project.time_limit(ps),
             output=str(project.log_dir() / f"{name}_%j.log"),
             **({"exclude": excl} if (excl := project.excluded_nodes(ps)) else {}),
+            **({"constraint": con} if (con := project.constraint(ps)) else {}),
         )
         nice = project.job_nice(ps, seed)
         sbatch_cmd = f"sbatch --nice={nice}"
