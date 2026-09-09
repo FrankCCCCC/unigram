@@ -693,10 +693,11 @@ class Loss:
                 Boundary table; `None` falls back to the fixed one the bridge
                 uses (`HyperBridge._vocab_angles`).
             prod_factor_dim (`List[int]`, *optional*):
-                Dimension of each factor. Both lists `None` means the single
-                factor `[embedding_dim]` at `[-1.0]`.
+                Dimension of each factor; they must all be EQUAL here. Both
+                lists `None` means the single factor `[embedding_dim]` at
+                `[-1.0]`.
             prod_factor_gaussian_curvature (`List[float]`, *optional*):
-                Curvature `K_m < 0` of each factor.
+                Curvature `K_m < 0` of each factor, free to differ per factor.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
@@ -718,6 +719,10 @@ class Loss:
             embedding_size=embedding_size,
         )
         assert(rhos.shape == (batch_size, seq_len, len(dims)))
+        assert(len(set(dims)) == 1), (
+            "bridge_loss_elbo_refactor needs one shared factor dimension; got "
+            f"prod_factor_dim={dims}."
+        )
 
         phis = HyperBridge._vocab_angles(
             vocab_size=V,
@@ -730,35 +735,47 @@ class Loss:
         mu = probs - torch.nn.functional.one_hot(targets,V).to(torch.float64)
         tiny = torch.finfo(torch.float64).tiny
 
-        loss, offset = 0.0, 0
-        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
-            theta_m = thetas[:, :, offset:offset + factor_dim]
-            phis_m = phis[:, offset:offset + factor_dim]
-            offset += factor_dim
-            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
-            # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
-            # exp_pos below overflows past u ~ 710 (Invariant 4).
-            us = (kappa * rhos[:, :, i]).clamp_max(HyperBridge.RHO_MAX)
-            # Per-factor sphere S^{d_m-1}: horosphere_geometry re-normalizes the
-            # block, and its `rhos` argument is exactly this dimensionless u.
-            phis_m, sin_half_sq, cos_half_sq, _ = HyperBridge.horosphere_geometry(
-                rhos=us, thetas=theta_m, vocab_size=V, word_embedding=phis_m,
-            )
-            # Transport each word's boundary direction into the frame at z, as in
-            # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
-            # cancellation-free (Invariant 5); the result is a unit vector.
-            exp_pos = us[..., None].exp()
-            exp_neg = (-us[..., None]).exp()
-            radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
-            denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
-            inners = cos_half_sq - sin_half_sq  # <theta_m, phi_v>
-            perps = phis_m[None, :, :] - inners[..., None] * theta_m[..., None, :]
-            ws = (radial_parts[..., None] * theta_m[..., None, :] + perps) / denoms[..., None]
-            # Bridge drift toward word v is (d_m-1) kappa_m w_v, so the Girsanov
-            # integrand is (d_m-1)^2 kappa_m^2 / 2 ||sum_v mu_v w_v||^2.
-            errors = (mu[..., None] * ws).sum(-2)
-            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * errors.square().sum(-1) / 2
-        return loss
+        # No python loop over factors: one shared factor dimension splits the
+        # concatenated boundary axis by a reshape, and every term below is
+        # elementwise in the resulting factor axis, which the final sum contracts
+        # away. Curvature stays per-factor, as the `kappas` vector. Axis layout
+        # is (batch, seq, V, factor[, dim]).
+        factor_dim, num_factors = dims[0], len(dims)
+        theta_m = thetas.unflatten(-1, (num_factors, factor_dim)).unsqueeze(-3)
+        # Per-factor sphere S^{d-1}: a per-factor SLICE of an embedding row is
+        # not unit-norm even when the full row is, and the half-angle identities
+        # below need UNIT phi.
+        phis_m = phis.unflatten(-1, (num_factors, factor_dim))
+        phis_m = phis_m / phis_m.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
+        kappas = thetas.new_tensor(
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+        )
+        # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
+        # exp_pos below overflows past u ~ 710 (Invariant 4).
+        us = (kappas * rhos).clamp_max(HyperBridge.RHO_MAX)
+        #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
+        #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
+        # in the cancellation-free difference form (Invariant 5); only these two
+        # are needed here, so the horosphere log is not formed at all.
+        sin_half_sq = (theta_m - phis_m).square().sum(-1) / 4
+        cos_half_sq = (theta_m + phis_m).square().sum(-1) / 4
+        # Transport each word's boundary direction into the frame at z, as in
+        # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
+        # cancellation-free (Invariant 5); the result is a unit vector.
+        exp_pos = us.unsqueeze(-2).exp()
+        exp_neg = (-us.unsqueeze(-2)).exp()
+        radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
+        denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
+        inners = cos_half_sq - sin_half_sq  # <theta_m, phi_v>
+        perps = phis_m - inners[..., None] * theta_m
+        ws = (radial_parts[..., None] * theta_m + perps) / denoms[..., None]
+        # Bridge drift toward word v is (d-1) kappa_m w_v, so the Girsanov
+        # integrand is (d-1)^2 kappa_m^2 / 2 ||sum_v mu_v w_v||^2, summed over
+        # the independent factors.
+        errors = (mu[..., None, None] * ws).sum(-3)
+        return (
+            (factor_dim - 1) ** 2 * kappas.square() * errors.square().sum(-1)
+        ).sum(-1) / 2
 
     """
     Loss of arbitary dimension Poincare Disk, Cross Entropy
@@ -855,10 +872,11 @@ class Loss:
                 Boundary table. Only the target row is read, and only through
                 its per-factor directions, so the row scale is irrelevant.
             prod_factor_dim (`List[int]`, *optional*):
-                Dimension of each factor. Both lists `None` means the single
-                factor `[embedding_dim]` at `[-1.0]`.
+                Dimension of each factor; they must all be EQUAL here. Both
+                lists `None` means the single factor `[embedding_dim]` at
+                `[-1.0]`.
             prod_factor_gaussian_curvature (`List[float]`, *optional*):
-                Curvature `K_m < 0` of each factor.
+                Curvature `K_m < 0` of each factor, free to differ per factor.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
@@ -880,6 +898,14 @@ class Loss:
             embedding_size=embedding_size,
         )
         assert(rhos.shape == (batch_size, seq_len, len(dims)))
+        # ONE shared factor dimension, so the concatenated boundary axis splits
+        # by a reshape and the whole loss is plain tensor ops on a
+        # (batch, seq, factor, dim) view -- no per-factor bookkeeping at all.
+        assert(len(set(dims)) == 1), (
+            "bridge_loss_variational_crossentropy_refactor needs one shared factor "
+            f"dimension; got prod_factor_dim={dims}."
+        )
+        factor_shape = (len(dims), dims[0])
         tiny = torch.finfo(torch.float64).tiny
 
         # F.cross_entropy takes the class axis at dim 1: input (N, C, d1, ...)
@@ -894,39 +920,25 @@ class Loss:
         phis = word_embedding.to(torch.float64)
         # Only the TARGET endpoint enters D_x, and only through its per-factor
         # directions -- so the row scale of `word_embedding` never matters.
-        xs = phis[targets]
-        uniform_dim = dims[0] if len(set(dims)) == 1 else None
-        factor_of_col = torch.repeat_interleave(
-            torch.arange(len(dims), device=thetas.device),
-            torch.tensor(dims, device=thetas.device),
-        )
-
-        def factor_sum(values):
-            """Contract the concatenated boundary axis into one entry per factor.
-
-            A FIXED-ORDER reduction, not `index_add`: the latter is shorter but
-            its CUDA atomics leave the summation order undefined, and this loss
-            turns a 1-ulp wobble in a boundary direction into orders of
-            magnitude -- past `u ~ 37` the bridge direction reaches the target to
-            full float64 precision, so `sin_half_sq` is either exactly 0 (weight
-            `e^{2u}`) or ~1e-32 (weight ~`e^{2u} 1e-32`), and which one it lands
-            on must not depend on the reduction order.
-            """
-            if uniform_dim is not None:
-                return values.unflatten(-1, (len(dims), uniform_dim)).sum(-1)
-            return torch.stack([v.sum(-1) for v in values.split(dims, dim=-1)], dim=-1)
-
+        xs = phis[targets].unflatten(-1, factor_shape)
+        theta_m = thetas.unflatten(-1, factor_shape)
         # Per-factor sphere S^{d_m-1}: a per-factor SLICE of an embedding row is
         # not unit-norm even when the full row is, and the half-angle identities
         # below need UNIT x_m.
-        xs = xs / factor_sum(xs.square()).sqrt().clamp_min(tiny)[..., factor_of_col]
+        xs = xs / xs.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
         #   sin^2(a/2) = (1 - <x_m, theta_m>) / 2 = ||theta_m - x_m||^2 / 4
         #   cos^2(a/2) = (1 + <x_m, theta_m>) / 2 = ||theta_m + x_m||^2 / 4
         # in the cancellation-free difference form: evaluating 1 - <x_m, theta_m>
         # directly collapses to 0 once the bridge direction is within ~1e-8 of
-        # the target, and D_x with it (Invariant 5).
-        sin_half_sq = factor_sum((thetas - xs).square()) / 4
-        cos_half_sq = factor_sum((thetas + xs).square()) / 4
+        # the target, and D_x with it (Invariant 5). Contracting the factor's own
+        # axis also keeps the summation order FIXED -- `index_add` over the
+        # concatenated axis would be equivalent in exact arithmetic, but its CUDA
+        # atomics leave that order undefined, and past `u ~ 37` the bridge
+        # direction reaches the target to full float64 precision, so a 1-ulp
+        # wobble flips sin_half_sq between exactly 0 (weight `e^{2u}`) and
+        # ~1e-32 (weight ~`e^{2u} 1e-32`).
+        sin_half_sq = (theta_m - xs).square().sum(-1) / 4
+        cos_half_sq = (theta_m + xs).square().sum(-1) / 4
         kappas = thetas.new_tensor(
             [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
         )
