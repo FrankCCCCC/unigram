@@ -908,13 +908,19 @@ class Loss:
         factor_shape = (len(dims), dims[0])
         tiny = torch.finfo(torch.float64).tiny
 
-        # F.cross_entropy takes the class axis at dim 1: input (N, C, d1, ...)
-        # against target (N, d1, ...). Passing (batch_size, seq_len, V) directly
-        # would score seq_len as the classes.
-        ce_loss = torch.nn.functional.cross_entropy(
-            logits.to(torch.float64).transpose(1, 2),
-            targets,
-            reduction='none',
+        # CE = softplus(logsumexp_{v != y}(logit_v - logit_y)). Excluding
+        # the target preserves tiny CE values and their target-logit gradients
+        # before the potentially huge geometric weight amplifies them.
+        logits64 = logits.to(torch.float64)
+        gaps = logits64 - logits64.gather(-1, targets[..., None])
+        gaps = gaps.scatter(-1, targets[..., None], float('-inf'))
+        log_odds = torch.logsumexp(gaps, dim=-1)
+        # log(softplus(s)) = s to float64 precision in the negative tail.
+        # Clamp the inactive branch too, so its backward cannot encounter log(0).
+        log_ce = torch.where(
+            log_odds < -35.0,
+            log_odds,
+            torch.nn.functional.softplus(log_odds.clamp_min(-35.0), threshold=40.0).log(),
         )
 
         phis = word_embedding.to(torch.float64)
@@ -955,11 +961,11 @@ class Loss:
         ).clamp_min(tiny).log()
         # sum_m (d_m-1)^2 kappa_m^2 / D_{x_m}^2, accumulated in log space. Each
         # summand reaches e^{2 RHO_MAX} ~ 1e304 on its own, so the linear sum has
-        # no headroom left; logsumexp keeps every partial result representable
-        # and exponentiates once, at the end.
+        # no headroom left; combine with log CE before exponentiating so a
+        # representable weighted loss survives even when the weight overflows.
         dim_kappas = thetas.new_tensor([float(factor_dim - 1) for factor_dim in dims]) * kappas
-        weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1).exp()
-        return weight * ce_loss
+        log_weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1)
+        return (log_weight + log_ce).exp()
 
     @staticmethod
     def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar", prod_factor_dim=None, prod_factor_gaussian_curvature=None):
