@@ -1,11 +1,11 @@
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
-from geo_bridge import HyperbolicHeatKernel
-from model import uniform_sphere_points
+from geo_bridge import GeoUtils, HyperbolicHeatKernel
+from model import HyperbolicModelBase, uniform_sphere_points
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
@@ -412,17 +412,39 @@ class HyperBridge:
         return rhos, us
 
     @staticmethod
-    def horosphere_geometry(rhos, thetas, vocab_size, word_embedding=None):
+    def horosphere_geometry(rhos, thetas, vocab_size, word_embedding):
         """Shared geometry: (phis, sin_half_sq, cos_half_sq, horosphere_dists).
 
         d-dimensional analogue of binary_horosphere_geometry, with the bridge
-        direction `thetas` a unit vector of shape (N, d) instead of a scalar
-        angle. `horosphere_dists[n, v] = -(d-1) B_v(z_n)` -- `B_v` the Busemann
+        direction `thetas` a unit vector of shape (..., d) instead of a scalar
+        angle. `horosphere_dists[..., v] = -(d-1) B_v(z)` -- `B_v` the Busemann
         function of word v's boundary point -- is the log density of the bridge
         direction at word v, up to a v-independent constant, so
         `softmax(horosphere_dists + log p)` is exactly the Bayes posterior
         q(y | z_t). Every consumer of the logits must therefore treat them as a
         RESIDUAL on top of this term.
+
+        Leading axes are free: `...` is `(N,)` on the binary/legacy path and
+        `(batch_size, seq_len)` on the refactored one.
+
+        Args:
+            rhos (`torch.Tensor` of shape `(...)`):
+                Dimensionless radius u = kappa*rho of this factor.
+            thetas (`torch.Tensor` of shape `(..., embedding_dim)`):
+                Unit bridge direction on this factor's sphere.
+            vocab_size (`int`):
+                V, used only when `word_embedding` is None.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`):
+                Boundary table; `None` falls back to the fixed one the bridge
+                uses (`HyperBridge._vocab_angles`). Either way it is passed
+                through `_vocab_angles`, which L2-normalizes the rows -- the
+                half-angle identities below are only valid for UNIT phi, and a
+                per-factor SLICE of an embedding row is not unit-norm even when
+                the full row is.
+
+        Returns:
+            `(phis, sin_half_sq, cos_half_sq, horosphere_dists)`, float64, with
+            the three `(..., V)` tensors and `phis` of shape `(V, embedding_dim)`.
         """
         phis = HyperBridge._vocab_angles(
             vocab_size=vocab_size,
@@ -439,8 +461,8 @@ class HyperBridge:
         # 1 - <u, phi_v> directly collapses to 0 once the bridge direction is
         # within ~1e-8 of the target word, its log to -inf, and the backward
         # pass to 0 * inf = NaN.
-        diffs = thetas[:, None, :] - phis[None, :, :]
-        sums = thetas[:, None, :] + phis[None, :, :]
+        diffs = thetas[..., None, :] - phis[None, :, :]
+        sums = thetas[..., None, :] + phis[None, :, :]
         sin_half_sq = diffs.square().sum(-1) / 4
         cos_half_sq = sums.square().sum(-1) / 4
         # -(d-1) log(cosh rho - sinh rho <u, phi_v>), with e^rho pulled out of
@@ -449,8 +471,8 @@ class HyperBridge:
         # for the target word); without it horosphere_dists is +inf and the
         # softmax downstream returns NaN for the whole row.
         horosphere_dists = -(d - 1) * (
-            rhos[:, None] + (
-                sin_half_sq + cos_half_sq * (-2 * rhos[:, None]).exp()
+            rhos[..., None] + (
+                sin_half_sq + cos_half_sq * (-2 * rhos[..., None]).exp()
             ).clamp_min(torch.finfo(torch.float64).tiny).log()
         )
         return phis, sin_half_sq, cos_half_sq, horosphere_dists
@@ -566,7 +588,7 @@ class Loss:
         return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
 
     """
-    Loss of arbitary dimension Poincare Disk
+    Loss of arbitary dimension Poincare Disk, Cross Entropy
     """
     @staticmethod
     def bridge_loss_crossentropy(logits, targets, rhos, thetas, word_embedding=None):
@@ -608,6 +630,182 @@ class Loss:
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
             bridge = Loss.bridge_loss_crossentropy(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+            )
+        else:
+            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
+        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
+
+    """
+    Loss of arbitary dimension Poincare Disk, Polar
+    """
+    @staticmethod
+    def bridge_loss_elbo_refactor(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Full path-KL of the bridge on a product of Poincare balls.
+
+        Product-manifold, curvature-aware form of
+        `bridge_loss_poincare_disk_polar` (slides/aug26_2026, "Complete
+        Physical-Time Hyperbolic ELBO"). Per factor m, with
+        `kappa_m = sqrt(-K_m)`, `u_m = kappa_m rho_m` the DIMENSIONLESS radius,
+        `alpha_v = <phi_v, theta_m>` and `D_v = cosh(u_m) - sinh(u_m) alpha_v`:
+
+            A_v = (cosh(u_m) alpha_v - sinh(u_m)) / D_v    radial component
+            C_v = (I - theta theta^T) phi_v / D_v          angular component
+            w_v = A_v theta_m + C_v,                       ||w_v|| == 1
+
+            (d_m - 1)^2 kappa_m^2 / 2 * || sum_v mu_v w_v ||^2,
+            mu_v = p_theta(v) - delta_{v,target}
+
+        BOTH drift components are included, so this is a genuine ELBO on the
+        NLL and is tight at the Bayes-optimal posterior (measured 1.009 H(p)).
+        Since ||w_v|| == 1 the integrand is bounded by 2 (d_m-1)^2 kappa_m^2 --
+        unlike the angular-only surrogate, whose 1/D_x^2 weight diverges.
+        Factors are independent Brownian motions, so their terms add.
+
+        `logits` are the model's log-posterior over words -- the horosphere
+        readout is already applied (`HyperbolicModelBase.forward_horosphere`),
+        so `p_theta` is their plain softmax and horosphere_dists must NOT be
+        added a second time (Invariant 1).
+
+        Args:
+            logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(batch_size, seq_len, prod_factor_num)` or `(batch_size, seq_len,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`):
+                Boundary table; `None` falls back to the fixed one the bridge
+                uses (`HyperBridge._vocab_angles`).
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension of each factor. Both lists `None` means the single
+                factor `[embedding_dim]` at `[-1.0]`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_m < 0` of each factor.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
+        """
+        (batch_size, seq_len) = targets.shape
+        assert(logits.shape[:2] == (batch_size, seq_len))
+        V = logits.shape[-1]
+        embedding_size = thetas.shape[-1]
+        assert(thetas.shape == (batch_size, seq_len, embedding_size))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, embedding_size)
+        if rhos.ndim == 2:
+            rhos = rhos[..., None]
+        dims, curvatures = HyperbolicModelBase.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        assert(rhos.shape == (batch_size, seq_len, len(dims)))
+
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V,
+            emb_dim=embedding_size,
+            device=thetas.device,
+            dtype=torch.float64,
+            word_embedding=word_embedding,
+        )
+        probs = logits.to(torch.float64).softmax(-1)
+        mu = probs - torch.nn.functional.one_hot(targets,V).to(torch.float64)
+        tiny = torch.finfo(torch.float64).tiny
+
+        loss, offset = 0.0, 0
+        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
+            theta_m = thetas[:, :, offset:offset + factor_dim]
+            phis_m = phis[:, offset:offset + factor_dim]
+            offset += factor_dim
+            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
+            # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
+            # exp_pos below overflows past u ~ 710 (Invariant 4).
+            us = (kappa * rhos[:, :, i]).clamp_max(HyperBridge.RHO_MAX)
+            # Per-factor sphere S^{d_m-1}: horosphere_geometry re-normalizes the
+            # block, and its `rhos` argument is exactly this dimensionless u.
+            phis_m, sin_half_sq, cos_half_sq, _ = HyperBridge.horosphere_geometry(
+                rhos=us, thetas=theta_m, vocab_size=V, word_embedding=phis_m,
+            )
+            # Transport each word's boundary direction into the frame at z, as in
+            # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
+            # cancellation-free (Invariant 5); the result is a unit vector.
+            exp_pos = us[..., None].exp()
+            exp_neg = (-us[..., None]).exp()
+            radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
+            denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
+            inners = cos_half_sq - sin_half_sq  # <theta_m, phi_v>
+            perps = phis_m[None, :, :] - inners[..., None] * theta_m[..., None, :]
+            ws = (radial_parts[..., None] * theta_m[..., None, :] + perps) / denoms[..., None]
+            # Bridge drift toward word v is (d_m-1) kappa_m w_v, so the Girsanov
+            # integrand is (d_m-1)^2 kappa_m^2 / 2 ||sum_v mu_v w_v||^2.
+            errors = (mu[..., None] * ws).sum(-2)
+            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * errors.square().sum(-1) / 2
+        return loss
+
+    """
+    Loss of arbitary dimension Poincare Disk, Cross Entropy
+    """
+    @staticmethod
+    def bridge_loss_crossentropy_refactor(logits, targets, rhos, thetas, word_embedding=None):
+        """
+        Denoising cross-entropy of the model's OWN predictive distribution.
+
+        Args:
+            logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(batch_size, seq_len, prod_factor_num)` or `(batch_size, seq_len,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`, *optional*):
+                Boundary table; `None` falls back to the fixed one the bridge
+                uses (`HyperBridge._vocab_angles`).
+        
+        Returns:
+            `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
+        """
+        # F.cross_entropy takes the class axis at dim 1: input (N, C, d1, ...)
+        # against target (N, d1, ...). Passing (batch_size, seq_len, V) directly
+        # would score seq_len as the classes.
+        return torch.nn.functional.cross_entropy(
+            logits.to(torch.float64).transpose(1, 2),
+            targets,
+            reduction='none',
+        )
+
+    @staticmethod
+    def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar", prod_factor_dim=None, prod_factor_gaussian_curvature=None):
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            bridge = Loss.bridge_loss_elbo_refactor(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            )
+        elif loss_geometry == LossGeometry.CROSS_ENTROPY:
+            bridge = Loss.bridge_loss_crossentropy_refactor(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,

@@ -6,8 +6,18 @@
 Reads every output/{project}/{run_name}/test_metrics.json, parses the swept
 variables back out of {run_name}, and emits the table layout defined in
 experiments/{project}/setup.md: one section per (ps, max_steps), each holding a
-CE table and a Polar-ELBO table, one row per loss proposal, cells reported as
-"avg ± std across seed".
+CE table and a Polar-ELBO table, one row per loss proposal.
+
+Every setup.md's "Result Presentation" asks for the POINT-ESTIMATE mean and
+variance, each averaged across the 3 seeds, so a cell reads "mean / variance":
+
+    mean      avg over seeds of test_<metric>          -- the point estimate
+    variance  avg over seeds of test_<metric>_std**2   -- the PER-SAMPLE variance
+              of the 4e6-draw test pass, in nats^2
+
+Note this is NOT the across-seed spread the tables used to print: that was a
+3-sample std of the mean, smaller by a factor of ~sqrt(4e6) and squared. The two
+are related by  across-seed std ~= sqrt(variance / test_size).
 
 The headline metric is wnelbo_ref: the poincare-polar ELBO measured on the
 reference pass, whose proposal is pinned to exp(0.1) for every cell, so it is
@@ -39,14 +49,58 @@ ENTROPY = {"naive_ps": 0.500288, "cmplx_ps": 1.666363, "cmplx_ps1": 2.298544,
 # (measured: L(t) ~ exp(-0.152 t), so the cliff sits at 2*0.152).
 VARIANCE_CLIFF = 0.304
 
-# setup.md column order -> key in test_metrics.json
+# The reference proposal setup.md pins (exp(0.1)) is a rate in PHYSICAL time t,
+# but every curvature-dependent quantity is a function of the DIMENSIONLESS time
+# t/R^2 with R = 1/sqrt(-K) (geo_bridge sample_radial draws R*rho_1(t/R^2), and
+# the loss only ever sees u = rho/R). The reference pass therefore runs at an
+# EFFECTIVE rate of REF_RATE/|K|, not REF_RATE, and flat curvature pushes it past
+# the cliff above: 1.0 at K = -0.1, 2.0 at K = -0.05, 10.0 at K = -0.01.
+#
+# Measured on the 1512-cell Bayes-optimal grid output/init_opt_test_3d_refactor_new,
+# where wnelbo_ref is provably >= H(p) because the posterior is exact -- mean gap
+# to H(p) over all 42 (lg, rate, seed) cells per curvature:
+#     K <= -0.1   within +-0.006 of H(p)      (sound)
+#     K  = -0.05  -0.011 / -0.028 / -0.009    (biased low)
+#     K  = -0.01  -0.141 / -0.423 / -0.274    (invalid)
+# for naive_ps / cmplx_ps / c1e3=c1e4. The model is fine there: the same runs'
+# test_wloss at an effective rate of 1.0 reads 0.4995 for naive_ps, i.e. the
+# integral really is H(p) and only the pinned reference misreads it.
+#
+# A product manifold takes its ceiling from the SHARPEST factor (see k_sort_key),
+# so the mixed vector [-0.01,-10.0,-1.0] is SOUND (+0.002) while a homogeneous
+# [-0.01,-0.01,-0.01] is not. setup.md pins ref_proposal_exp_rate = 0.1, so the
+# sweeps run as specified and the affected rows are flagged rather than dropped.
+REF_RATE = 0.1
+# Two tiers, set from the FINISHED Bayes-optimal controls (1680 + 1512 cells), where
+# wnelbo_ref is provably >= H(p) so any deficit is the estimator's. Mean gap to H(p):
+#
+#   eff rate   single manifold D=3          product D=9 (3 factors)
+#   <= 1.0     within +-0.006  (sound)      within +-0.005  (sound)
+#   2.0        -0.011 / -0.028 / -0.009     -0.002 / -0.000 / -0.001   <- D=3 biased, D=9 SOUND
+#   10.0       -0.141 / -0.423 / -0.274     -0.032 / -0.036 / -0.048   <- both invalid
+#
+# So the effective rate alone does not decide it: more factors identify the target
+# faster and rescue the estimator at the same rate. Hence CHECK (consult the mode=opt
+# control at the same (ps, K) before quoting) below 10, and SEVERE at or above it,
+# where every configuration measured is invalid.
+REF_EFF_CHECK = 1.0
+REF_EFF_SEVERE = 10.0
+
+# setup.md column order -> (mean key, per-sample std key or None).
+# trainer.BaseTrainer.STD_KEYS records a std for the three WEIGHTED quantities
+# only, so the unweighted nelbo_ref / ce_ref have no per-sample variance in any
+# existing run. Their variance renders as "n/r" rather than being dropped.
 COLUMNS = [
-    ("wloss", "test_wloss"),
-    ("wnelbo_ref", "test_wnelbo_ref"),
-    ("wce_ref", "test_wce_ref"),
-    ("nelbo_ref", "test_nelbo_ref"),
-    ("ce_ref", "test_ce_ref"),
+    ("wloss", "test_wloss", "test_wloss_std"),
+    ("wnelbo_ref", "test_wnelbo_ref", "test_wnelbo_ref_std"),
+    ("wce_ref", "test_wce_ref", "test_wce_ref_std"),
+    ("nelbo_ref", "test_nelbo_ref", None),
+    ("ce_ref", "test_ce_ref", None),
 ]
+# Draws behind each run's *_std, from setup.md's test_size. Only used to explain
+# the relation to the old across-seed spread in the header note.
+TEST_SIZE = 4_000_000
+NOT_RECORDED = "n/r"
 GEOMETRY_TITLE = [("ce", "CE"), ("pp", "Polar ELBO")]
 # Dense table: one wloss column per loss_geometry. NELBO and CE are both wloss,
 # measured with loss_geometry set to poincare_polar / cross_entropy.
@@ -60,10 +114,39 @@ PS_ORDER = ["naive_ps", "cmplx_ps", "cmplx_ps1",
 # hand, not by this script, so it is carried across a regeneration verbatim.
 HANDWRITTEN_MARKER = "# Insights and conclusions"
 
+# `_k-<curvature>` is optional: projects that sweep curvature put it in the run
+# name, older projects whose geometry is fixed keep it in the project name. A
+# product manifold whose factors differ tags them `x`-joined, e.g.
+# `_k--0.01x-10.0x-1.0`; identical factors collapse to the shared scalar.
 RUN_RE = re.compile(
-    r"^ps-(?P<ps>.+?)_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
+    r"^ps-(?P<ps>.+?)(?:_k-(?P<k>[^_]+))?_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
     r"_qref-(?P<qref>[^_]+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$"
 )
+
+
+def k_sort_key(k: str | None) -> tuple:
+    """Flattest curvature first; None (geometry fixed by project name) leads.
+
+    A product-manifold tag is a list of per-factor curvatures. It sorts by its
+    SHARPEST factor, because that is the one whose `_radial_t_max(d) * R^2`
+    ceiling main_refactor.py clamps the whole product to.
+    """
+    if k is None:
+        return (0, 0.0, "")
+    values = [float(v) for v in k.split("x")]
+    return (1, -min(values), k)
+
+
+def ref_effective_rate(k: str | None) -> float | None:
+    """Dimensionless rate the pinned reference proposal actually runs at.
+
+    `None` when the project's geometry is not in the run name (nothing to scale
+    by). A product takes its ceiling from the sharpest factor, so that is the
+    curvature that sets the effective rate.
+    """
+    if k is None:
+        return None
+    return REF_RATE / max(abs(float(v)) for v in k.split("x"))
 
 
 def rate_of(q: str) -> float:
@@ -74,10 +157,14 @@ def rate_of(q: str) -> float:
 
 
 def collect(project: str):
-    """(ps, steps, lg, q) -> {metric_label: [values across seeds]}"""
+    """(ps, k, steps, lg, q) -> {label: {"mean": [...], "var": [...]}}
+
+    One entry per seed in each list; "var" is empty for metrics whose runs
+    recorded no per-sample std.
+    """
     root = REPO_DIR / "output" / project
     cells: dict[tuple, dict[str, list[float]]] = {}
-    ps_seen, steps_seen, missing, unparsed = [], set(), 0, []
+    ps_seen, k_seen, steps_seen, missing, unparsed = [], [], set(), 0, []
     for run in sorted(p for p in root.iterdir() if p.is_dir() and p.name != "logs"):
         m = RUN_RE.match(run.name)
         if not m:
@@ -88,55 +175,88 @@ def collect(project: str):
             missing += 1
             continue
         data = json.load(f.open())
-        key = (m["ps"], int(m["st"]), m["lg"], m["q"])
+        key = (m["ps"], m["k"], int(m["st"]), m["lg"], m["q"])
         bucket = cells.setdefault(key, {})
-        for label, metric_key in COLUMNS:
+        for label, metric_key, std_key in COLUMNS:
+            slot = bucket.setdefault(label, {"mean": [], "var": []})
             value = data.get(metric_key)
             if value is not None and math.isfinite(value):
-                bucket.setdefault(label, []).append(float(value))
+                slot["mean"].append(float(value))
+            std = data.get(std_key) if std_key else None
+            if std is not None and math.isfinite(std):
+                slot["var"].append(float(std) ** 2)
         if m["ps"] not in ps_seen:
             ps_seen.append(m["ps"])
+        if m["k"] not in k_seen:
+            k_seen.append(m["k"])
         steps_seen.add(int(m["st"]))
-    return cells, ps_seen, sorted(steps_seen), missing, unparsed
+    return cells, ps_seen, k_seen, sorted(steps_seen), missing, unparsed
 
 
-def fmt(values: list[float] | None, n_expected: int) -> str:
-    if not values:
+def fmt(slot: dict | None, n_expected: int) -> str:
+    """"mean / variance", each averaged across seeds (setup.md)."""
+    if not slot or not slot["mean"]:
         return "-"
-    if len(values) == 1:
-        return f"{values[0]:.4f} (n=1)"
-    cell = f"{statistics.mean(values):.4f} ± {statistics.stdev(values):.4f}"
-    return cell if len(values) >= n_expected else f"{cell} (n={len(values)})"
+    means = slot["mean"]
+    var = f"{statistics.mean(slot['var']):.4g}" if slot["var"] else NOT_RECORDED
+    cell = f"{statistics.mean(means):.4f} / {var}"
+    return cell if len(means) >= n_expected else f"{cell} (n={len(means)})"
 
 
-def table(cells, ps: str, steps: int, lg: str, rates: list[str], n_expected: int) -> list[str]:
-    header = "| loss Proposal | " + " | ".join(label for label, _ in COLUMNS) + " |"
+def table(cells, ps: str, k: str | None, steps: int, lg: str,
+          rates: list[str], n_expected: int) -> list[str]:
+    header = "| loss Proposal | " + " | ".join(label for label, _, _ in COLUMNS) + " |"
     lines = [header, "|---" * (1 + len(COLUMNS)) + "|"]
     for q in rates:
-        bucket = cells.get((ps, steps, lg, q))
+        bucket = cells.get((ps, k, steps, lg, q))
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag] + [
-            fmt(bucket.get(label) if bucket else None, n_expected) for label, _ in COLUMNS
+            fmt(bucket.get(label) if bucket else None, n_expected)
+            for label, _, _ in COLUMNS
         ]
         lines.append("| " + " | ".join(row) + " |")
     return lines
 
 
-def dense_table(cells, ps: str, steps: int, rates: list[str], n_expected: int) -> list[str]:
+def dense_table(cells, ps: str, k: str | None, steps: int,
+                rates: list[str], n_expected: int) -> list[str]:
     header = "| Proposal | " + " | ".join(label for label, _ in DENSE_COLUMNS) + " |"
     lines = [header, "|---" * (1 + len(DENSE_COLUMNS)) + "|"]
     for q in rates:
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag]
         for _, lg in DENSE_COLUMNS:
-            bucket = cells.get((ps, steps, lg, q))
+            bucket = cells.get((ps, k, steps, lg, q))
             row.append(fmt(bucket.get("wloss") if bucket else None, n_expected))
         lines.append("| " + " | ".join(row) + " |")
     return lines
 
 
-def section_title(ps: str, steps: int, multi_step: bool) -> str:
-    return f"## {ps}, Training Step {steps}" if multi_step else f"## {ps}"
+def section_title(ps: str, k: str | None, steps: int, multi_step: bool) -> str:
+    title = f"## {ps}" if k is None else f"## {ps}, K = {k}"
+    return f"{title}, Training Step {steps}" if multi_step else title
+
+
+def section_warning(k: str | None) -> list[str]:
+    """The ⚠ block for a curvature where the pinned reference pass is suspect."""
+    eff = ref_effective_rate(k)
+    if eff is None or eff <= REF_EFF_CHECK:
+        return []
+    head = (f"> ⚠ **`wnelbo_ref` is NOT a valid ELBO in this section.**"
+            if eff >= REF_EFF_SEVERE else
+            f"> ⚠ **Check `wnelbo_ref` against the `mode=opt` control before quoting it.**")
+    body = ([f"> Every configuration measured at this rate is invalid: the exact Bayes posterior",
+             f"> itself reads 0.03-0.42 nats BELOW `H(p)` here. Read these rows as a measurement",
+             f"> of the ESTIMATOR, not of the model or the geometry."]
+            if eff >= REF_EFF_SEVERE else
+            [f"> Past the ~{VARIANCE_CLIFF} cliff, the estimate CAN be truncation-biased low, but whether it",
+             f"> actually is depends on the factor count: at this rate the single manifold `H^3`",
+             f"> measures 0.009-0.028 nats below `H(p)` for the exact posterior while the 3-factor",
+             f"> product measures within 0.002 of it. Consult the matching `init_opt_test_*` cell."])
+    return [head,
+            f"> The pinned exp({REF_RATE}) reference runs here at an effective dimensionless rate of",
+            f"> **{eff:.3g}** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.",
+            ] + body + [""]
 
 
 def handwritten_tail(dest: Path) -> list[str]:
@@ -155,11 +275,16 @@ def main() -> None:
                     help="expected seeds per cell; cells with fewer are marked (n=k)")
     args = ap.parse_args()
 
-    cells, ps_list, steps_list, missing, unparsed = collect(args.project)
+    cells, ps_list, k_list, steps_list, missing, unparsed = collect(args.project)
     ps_list.sort(key=lambda p: (PS_ORDER.index(p) if p in PS_ORDER else len(PS_ORDER), p))
-    rates = sorted({k[3] for k in cells}, key=rate_of)
-    n_runs = sum(len(v.get("wnelbo_ref", [])) for v in cells.values())
-    total = len(ps_list) * len(steps_list) * len(GEOMETRY_TITLE) * len(rates) * args.seeds
+    # Curvature sections run from flattest to sharpest; None is the single
+    # "geometry fixed by the project name" section.
+    k_list.sort(key=k_sort_key)
+    rates = sorted({key[4] for key in cells}, key=rate_of)
+    n_runs = sum(len(v["wnelbo_ref"]["mean"]) for v in cells.values()
+                 if "wnelbo_ref" in v)
+    total = (len(ps_list) * len(k_list) * len(steps_list)
+             * len(GEOMETRY_TITLE) * len(rates) * args.seeds)
 
     out = [
         f"# {args.project} results",
@@ -171,9 +296,26 @@ def main() -> None:
         if ps in ENTROPY:
             out.append(f"- H({ps}) = **{ENTROPY[ps]:.4f}** — wnelbo_ref is bounded below by this")
     out += [
+        "- Each cell is **`mean / variance`**, both averaged across the 3 seeds, as",
+        "  setup.md's \"Result Presentation\" asks: `mean` is the point estimate",
+        "  (avg of `test_<metric>`), `variance` is the PER-SAMPLE variance of the",
+        f"  {TEST_SIZE:,}-draw test pass in nats² (avg of `test_<metric>_std**2`).",
+        f"- `{NOT_RECORDED}` = not recorded. `trainer.BaseTrainer.STD_KEYS` logs a per-sample",
+        "  std for the three WEIGHTED quantities only, so `nelbo_ref` and `ce_ref` have no",
+        "  variance in any existing run; filling them needs STD_KEYS extended and a re-run.",
+        "- These variances are NOT the `± std` these tables used to print. That was the",
+        f"  across-seed spread of the mean, related by `± ≈ sqrt(variance / {TEST_SIZE:,})`.",
         f"- `!` marks loss proposals above the ~{VARIANCE_CLIFF} variance cliff, where the",
-        "  weighted estimator has infinite variance. The reference pass is pinned at",
-        "  exp(0.1) and stays valid, but training there is materially noisier.",
+        "  weighted estimator has infinite variance; training there is materially noisier.",
+        "- **The reference pass does NOT stay valid at every curvature.** Its rate is",
+        f"  pinned at exp({REF_RATE}) in PHYSICAL time, while the bridge is a function of the",
+        "  dimensionless `t/R²`, so its effective rate is `0.1/|K|` — past the cliff",
+        "  above once `|K| < 0.33`. Sections past it carry a ⚠: **severe** at an effective",
+        f"  rate >= {REF_EFF_SEVERE:.0f} (every configuration measured there is invalid — the exact posterior",
+        f"  reads below `H(p)`), **check** between {REF_EFF_CHECK:.0f} and {REF_EFF_SEVERE:.0f}, where it depends on the factor",
+        "  count: at rate 2 the single `H^3` is biased 0.009-0.028 nats low while the 3-factor",
+        "  product is within 0.002. A product is governed by its SHARPEST factor, so a mixed",
+        "  vector containing one sharp factor stays sound while an all-flat one may not.",
         "- `wce_ref` is dominated by rare extremes; treat its spread as indicative only.",
     ]
     if unparsed:
@@ -182,21 +324,25 @@ def main() -> None:
     multi_step = len(steps_list) > 1
     out += ["", "---", "", "# Results (Full Table)", ""]
     for ps in ps_list:
-        for steps in steps_list:
-            out += ["---", "", section_title(ps, steps, multi_step), "",
-                    "Each cell: avg & std across seed", ""]
-            for lg, title in GEOMETRY_TITLE:
-                out += [f"**{title}**", ""]
-                out += table(cells, ps, steps, lg, rates, args.seeds)
-                out += [""]
+        for k in k_list:
+            for steps in steps_list:
+                out += ["---", "", section_title(ps, k, steps, multi_step), ""]
+                out += section_warning(k)
+                out += ["Each cell: point-estimate mean / per-sample variance, "
+                        "averaged across 3 seeds", ""]
+                for lg, title in GEOMETRY_TITLE:
+                    out += [f"**{title}**", ""]
+                    out += table(cells, ps, k, steps, lg, rates, args.seeds)
+                    out += [""]
 
     out += ["---", "", "# RESULTS (Dense Table)", ""]
     for ps in ps_list:
-        for steps in steps_list:
-            out += ["---", "", section_title(ps, steps, multi_step), "",
-                    DENSE_NOTE, ""]
-            out += dense_table(cells, ps, steps, rates, args.seeds)
-            out += [""]
+        for k in k_list:
+            for steps in steps_list:
+                out += ["---", "", section_title(ps, k, steps, multi_step), "",
+                        DENSE_NOTE, ""]
+                out += dense_table(cells, ps, k, steps, rates, args.seeds)
+                out += [""]
 
     dest = REPO_DIR / "experiments" / args.project / "RESULTS.md"
     out += handwritten_tail(dest)
