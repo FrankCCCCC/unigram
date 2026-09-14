@@ -14,8 +14,16 @@
 - These variances are NOT the `± std` these tables used to print. That was the
   across-seed spread of the mean, related by `± ≈ sqrt(variance / 4,000,000)`.
 - `!` marks loss proposals above the ~0.304 variance cliff, where the
-  weighted estimator has infinite variance. The reference pass is pinned at
-  exp(0.1) and stays valid, but training there is materially noisier.
+  weighted estimator has infinite variance; training there is materially noisier.
+- **The reference pass does NOT stay valid at every curvature.** Its rate is
+  pinned at exp(0.1) in PHYSICAL time, while the bridge is a function of the
+  dimensionless `t/R²`, so its effective rate is `0.1/|K|` — past the cliff
+  above once `|K| < 0.33`. Sections past it carry a ⚠: **severe** at an effective
+  rate >= 10 (every configuration measured there is invalid — the exact posterior
+  reads below `H(p)`), **check** between 1 and 10, where it depends on the factor
+  count: at rate 2 the single `H^3` is biased 0.009-0.028 nats low while the 3-factor
+  product is within 0.002. A product is governed by its SHARPEST factor, so a mixed
+  vector containing one sharp factor stays sound while an all-flat one may not.
 - `wce_ref` is dominated by rare extremes; treat its spread as indicative only.
 
 ---
@@ -25,6 +33,13 @@
 ---
 
 ## naive_ps, K = -0.01
+
+> ⚠ **`wnelbo_ref` is NOT a valid ELBO in this section.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **10** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Every configuration measured at this rate is invalid: the exact Bayes posterior
+> itself reads 0.03-0.42 nats BELOW `H(p)` here. Read these rows as a measurement
+> of the ESTIMATOR, not of the model or the geometry.
 
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
@@ -43,6 +58,14 @@ Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 ---
 
 ## naive_ps, K = -0.05
+
+> ⚠ **Check `wnelbo_ref` against the `mode=opt` control before quoting it.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **2** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Past the ~0.304 cliff, the estimate CAN be truncation-biased low, but whether it
+> actually is depends on the factor count: at this rate the single manifold `H^3`
+> measures 0.009-0.028 nats below `H(p)` for the exact posterior while the 3-factor
+> product measures within 0.002 of it. Consult the matching `init_opt_test_*` cell.
 
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
@@ -188,6 +211,13 @@ Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
 ## cmplx_ps, K = -0.01
 
+> ⚠ **`wnelbo_ref` is NOT a valid ELBO in this section.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **10** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Every configuration measured at this rate is invalid: the exact Bayes posterior
+> itself reads 0.03-0.42 nats BELOW `H(p)` here. Read these rows as a measurement
+> of the ESTIMATOR, not of the model or the geometry.
+
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
 **Variational CE**
@@ -205,6 +235,14 @@ Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 ---
 
 ## cmplx_ps, K = -0.05
+
+> ⚠ **Check `wnelbo_ref` against the `mode=opt` control before quoting it.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **2** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Past the ~0.304 cliff, the estimate CAN be truncation-biased low, but whether it
+> actually is depends on the factor count: at this rate the single manifold `H^3`
+> measures 0.009-0.028 nats below `H(p)` for the exact posterior while the 3-factor
+> product measures within 0.002 of it. Consult the matching `init_opt_test_*` cell.
 
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
@@ -350,6 +388,13 @@ Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
 ## c1e4_exp1.0, K = -0.01
 
+> ⚠ **`wnelbo_ref` is NOT a valid ELBO in this section.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **10** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Every configuration measured at this rate is invalid: the exact Bayes posterior
+> itself reads 0.03-0.42 nats BELOW `H(p)` here. Read these rows as a measurement
+> of the ESTIMATOR, not of the model or the geometry.
+
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
 **Variational CE**
@@ -367,6 +412,14 @@ Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 ---
 
 ## c1e4_exp1.0, K = -0.05
+
+> ⚠ **Check `wnelbo_ref` against the `mode=opt` control before quoting it.**
+> The pinned exp(0.1) reference runs here at an effective dimensionless rate of
+> **2** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.
+> Past the ~0.304 cliff, the estimate CAN be truncation-biased low, but whether it
+> actually is depends on the factor count: at this rate the single manifold `H^3`
+> measures 0.009-0.028 nats below `H(p)` for the exact posterior while the 3-factor
+> product measures within 0.002 of it. Consult the matching `init_opt_test_*` cell.
 
 Each cell: point-estimate mean / per-sample variance, averaged across 3 seeds
 
