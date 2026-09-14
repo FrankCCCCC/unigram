@@ -348,10 +348,11 @@ class HyperbolicModelBase(nn.Module, ABC):
             radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
                 Intrinsic radial coordinate of each product factor.
             prod_factor_dim (`Union[int, List[int]]`, *optional*):
-                Dimension of each factor. Both lists `None` means the single
-                factor `[embedding_size]` at `[-1.0]`.
+                Dimension of each factor; they must all be EQUAL here. Both
+                lists `None` means the single factor `[embedding_size]` at
+                `[-1.0]`.
             prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
-                Curvature `K_i < 0` of each factor.
+                Curvature `K_i < 0` of each factor, free to differ per factor.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
@@ -381,28 +382,36 @@ class HyperbolicModelBase(nn.Module, ABC):
                 f"radius must carry one radial coordinate per product factor "
                 f"({len(dims)}); got {radius.shape[-1]}."
             )
+        if len(set(dims)) != 1:
+            raise ValueError(
+                f"horosphere_geometry needs one shared factor dimension; got {dims}."
+            )
         theta = theta.to(torch.float64)
         radius = radius.to(torch.float64)
         tiny = torch.finfo(torch.float64).tiny
 
-        horosphere_dists, offset = 0.0, 0
-        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
-            # us: (..., 1, d_i) against phis: (V, d_i) -> (..., V, d_i)
-            us = theta[..., offset:offset + factor_dim].unsqueeze(-2)
-            phis = embedding[:, offset:offset + factor_dim]
-            offset += factor_dim
-            phis = phis / phis.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
-            #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
-            #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
-            sin_half_sq = (us - phis).square().sum(-1) / 4
-            cos_half_sq = (us + phis).square().sum(-1) / 4
-            ss = (radius[..., i] / GeoUtils._curvature_scale(factor_curvature)).unsqueeze(-1)
-            horosphere_dists = horosphere_dists - (factor_dim - 1) * (
-                ss + (
-                    sin_half_sq + cos_half_sq * (-2.0 * ss).exp()
-                ).clamp_min(tiny).log()
-            )
-        return horosphere_dists
+        # No python loop over factors: one shared factor dimension splits the
+        # concatenated boundary axis by a reshape, and the whole formula is
+        # elementwise in the resulting factor axis, which the final sum
+        # contracts away. Curvature stays per-factor, as the `kappas` vector.
+        factor_dim, num_factors = dims[0], len(dims)
+        # us: (..., 1, m, d) against phis: (V, m, d) -> (..., V, m, d)
+        us = theta.unflatten(-1, (num_factors, factor_dim)).unsqueeze(-3)
+        phis = embedding.unflatten(-1, (num_factors, factor_dim))
+        phis = phis / phis.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
+        #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
+        #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
+        sin_half_sq = (us - phis).square().sum(-1) / 4
+        cos_half_sq = (us + phis).square().sum(-1) / 4
+        kappas = radius.new_tensor(
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+        )
+        ss = (radius * kappas).unsqueeze(-2)
+        return -(factor_dim - 1) * (
+            ss + (
+                sin_half_sq + cos_half_sq * (-2.0 * ss).exp()
+            ).clamp_min(tiny).log()
+        ).sum(-1)
 
     def forward_horosphere(
         self,

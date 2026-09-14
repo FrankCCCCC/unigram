@@ -998,7 +998,7 @@ class HyperbolicHeatKernel(GeoUtils):
         ts: torch.FloatTensor,
         d: int,
         seq_len: int,
-        gaussian_curvature: float=-1.0,
+        gaussian_curvature: Union[float, torch.FloatTensor]=-1.0,
         exact_d3: bool=False,
     ) -> torch.FloatTensor:
         """Sample `seq_len` radial coordinates per heat time from the `H^d` heat-kernel
@@ -1024,13 +1024,17 @@ class HyperbolicHeatKernel(GeoUtils):
             exact_d3 (`bool`, *optional*, defaults to `False`): for `d == 3` only,
                 invert the closed-form CDF instead of the quadrature grid. Exact
                 and free of the `_radial_t_max` ceiling.
-            gaussian_curvature (`float`, *optional*, defaults to `-1.0`):
+            gaussian_curvature (`float` or `torch.FloatTensor` of shape `(num_curvatures,)`, *optional*, defaults to `-1.0`):
                 Gaussian (sectional) curvature `K < 0`, setting the model radius
                 `R = 1/sqrt(|K|)`. `rho` is intrinsic (a geodesic distance), so it
-                carries the units of `R`.
+                carries the units of `R`. A 1-D TENSOR draws every curvature in
+                one call and adds a trailing axis to the result -- what the
+                product manifold needs, one column per factor.
 
         Returns:
-            `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples `>= 0`.
+            `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples
+            `>= 0`; `(batch_size, seq_len, num_curvatures)` for a tensor
+            `gaussian_curvature`, column `m` drawn at `gaussian_curvature[m]`.
 
         Note:
             The marginal `sinh^{d-1}(rho) p_H(rho; t)` is formed in linear (not log)
@@ -1041,20 +1045,61 @@ class HyperbolicHeatKernel(GeoUtils):
             marginal). The overflow threshold is on the unit-model radial `rho / R` at
             the unit-model time `t / R^2`, which is what the quadrature sees. See
             `unigram/notes/hyperbolic_heat_kernel_dd_derivation.md`.
+
+            A tensor `gaussian_curvature` builds one grid per (DISTINCT curvature,
+            heat time) pair, so its peak memory scales with the number of DISTINCT
+            values, not with `num_curvatures`. One shared curvature -- the product
+            manifold's usual case -- costs exactly what the scalar path costs: the
+            same grid and the same `rand(batch_size, seq_len * num_curvatures)`,
+            in the same order. The two agree to ~1e-15 rather than bit for bit,
+            because rescaling `t` by a tensor `R^2` and by a python-float `R^2`
+            take different kernels and can differ in the last ulp.
         """
-        assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
         if d < 2:
             raise ValueError(f"HyperbolicHeatKernel requires d >= 2; got d={d}")
         B = ts.shape[0]
-        if B == 0:
-            return ts.new_empty(0, seq_len)
         R = GeoUtils._curvature_scale(gaussian_curvature)
+        if not torch.is_tensor(R):
+            assert gaussian_curvature < 0.0, f"Hyperbolic gaussian_curvature should be negative"
+            if B == 0:
+                return ts.new_empty(0, seq_len)
+            if exact_d3:
+                if d == 3:
+                    return HyperbolicHeatKernel._sample_radial_exact_d3(
+                        ts, seq_len, gaussian_curvature)
+            rho, cdf = HyperbolicHeatKernel.radial_cdf(ts / (R * R), d)
+            u = torch.rand(B, seq_len, dtype=ts.dtype, device=ts.device)
+            return R * HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u)
+        assert bool((gaussian_curvature < 0.0).all()), f"Hyperbolic gaussian_curvature should be negative"
         if exact_d3:
             if d == 3:
-                return R * HyperbolicHeatKernel._sample_radial_exact_d3(ts / (R * R), seq_len)
-        rho, cdf = HyperbolicHeatKernel.radial_cdf(ts / (R * R), d)
-        u = torch.rand(B, seq_len, dtype=ts.dtype, device=ts.device)
-        return R * HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u)
+                return HyperbolicHeatKernel._sample_radial_exact_d3(
+                    ts, seq_len, gaussian_curvature)
+
+        # Every curvature in ONE call. Curvature reaches the radial law only
+        # through the rescaled time `t / R^2`, so `unique` is what makes that
+        # affordable: the quadrature runs over the DISTINCT (curvature, heat
+        # time) pairs, not over all of them. One row per FACTOR would be
+        # `num_curvatures * batch_size` rows of `_RADIAL_NGRID` float64 -- at 256
+        # factors and batch 2048 that is ~7.8 GiB per intermediate and ~47 GiB
+        # across the ones radial_cdf holds live, where the deduplicated 2048 rows
+        # cost ~197 MiB.
+        num_curvatures = R.numel()
+        if B == 0:
+            return ts.new_empty(0, seq_len, num_curvatures)
+        uniq_R, inverse = torch.unique(R, return_inverse=True)
+        curv_inv_unit_ts = (ts / (uniq_R * uniq_R).unsqueeze(-1)).reshape(-1)
+        # Each row draws a full `seq_len * num_curvatures` block; column m then
+        # reads it from the row holding m's own curvature, which is a valid draw
+        # because the columns within a row are i.i.d. At ONE shared curvature
+        # that is the scalar path's draw, in its order, with nothing discarded.
+        width = seq_len * num_curvatures
+        rho, cdf = HyperbolicHeatKernel.radial_cdf(curv_inv_unit_ts, d)
+        u = torch.rand(curv_inv_unit_ts.shape[0], width, dtype=ts.dtype, device=ts.device)
+        draws = HyperbolicHeatKernel._radial_inverse_cdf(rho, cdf, u)
+        draws = draws.view(uniq_R.numel(), B, seq_len, num_curvatures)
+        columns = torch.arange(num_curvatures, device=ts.device)
+        return R * draws[inverse, :, :, columns].permute(1, 2, 0)  # (B, seq_len, m)
 
     @staticmethod
     def _radial_cdf_exact_d3(rhos: torch.Tensor, ts: torch.Tensor) -> torch.Tensor:
@@ -1089,35 +1134,69 @@ class HyperbolicHeatKernel(GeoUtils):
             torch.special.ndtr(a) - torch.special.ndtr(-b) + (pdf_b - pdf_a) / st
         ).clamp(0.0, 1.0)
 
-    _EXACT_D3_BISECT: int = 48
-
     @staticmethod
-    def _sample_radial_exact_d3(ts: torch.FloatTensor, seq_len: int) -> torch.FloatTensor:
-        """Exact `H^3` radial sampler: inverse of `_radial_cdf_exact_d3` by bisection.
+    def _sample_radial_exact_d3(
+        ts: torch.FloatTensor,
+        seq_len: int,
+        gaussian_curvature: Union[float, torch.FloatTensor]=-1.0,
+    ) -> torch.FloatTensor:
+        r"""Exact `H^3` radial sampler: the marginal IS a NONCENTRAL chi_3.
 
-        No quadrature and no grid, so unlike `radial_cdf` it has no
-        `_radial_t_max` ceiling -- the marginal is never formed in linear space.
-        The bracket `[0, t + 14 sqrt(t)]` holds both regimes (`rho ~ sqrt(t)
-        chi_3` as `t -> 0`, `rho ~ N(t, t)` as `t -> inf`), and 48 halvings take
-        it to ~1e-14 of it, below float64's reach on `rho`.
+        With the volume element `sinh^2 rho`, the `H^3` kernel
+        `(2 pi t)^{-3/2} (rho / sinh rho) e^{-t/2 - rho^2/2t}` has radial marginal
+        `pi(rho) ∝ rho sinh(rho) e^{-rho^2/2t}` -- NOT `rho^2 e^{-rho^2/2t}`, so
+        not the central `sqrt(t) chi_3`. The extra `sinh(rho)/rho` is exactly the
+        spherical mean `<e^{rho <u,e_1>}>` over `S^2`, which identifies the law:
+        for `X ~ N(t e_1, t I_3)`, `|x - t e_1|^2 = rho^2 - 2 t rho <u,e_1> + t^2`,
+        so `|X|` has radial density
+        `∝ rho^2 e^{-(rho^2+t^2)/2t} sinh(rho)/rho` -- the same expression. Hence
+
+            rho = || N(t e_1, t I_3) ||,   a noncentral chi_3 of noncentrality sqrt(t)
+
+        (in `H^3_K` read at the rescaled time `t/R^2`, so curvature enters only
+        through the noncentrality). Three Gaussians therefore sample it exactly:
+        no quadrature, no grid, no bracket, no inversion error, and none of
+        `radial_cdf`'s `_radial_t_max` ceiling. Central `chi_3` is the `t -> 0`
+        limit and `N(t, t)` the `t -> inf` one -- both regimes, one draw.
+
+        `_radial_cdf_exact_d3` is the closed-form CDF of this same law, kept as
+        the analytic reference this sampler is validated against.
 
         Args:
-            ts (`torch.FloatTensor` of shape `(batch_size,)`): heat times `> 0`.
+            ts (`torch.FloatTensor` of shape `(batch_size,)`): heat times `> 0`,
+                in PHYSICAL time -- curvature is applied here, so unlike the
+                quadrature path the caller neither rescales `ts` nor rescales the
+                result.
             seq_len (`int`): samples per heat time.
+            gaussian_curvature (`float` or `torch.FloatTensor` of shape `(num_curvatures,)`, *optional*, defaults to `-1.0`):
+                Curvature `K < 0`. A 1-D tensor draws every curvature at once and
+                adds the trailing axis, exactly as `sample_radial` does.
 
         Returns:
-            `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples `>= 0`.
+            `torch.FloatTensor` of shape `(batch_size, seq_len)`, or
+            `(batch_size, seq_len, num_curvatures)` for a tensor curvature:
+            radial samples `>= 0`.
         """
-        tcol = ts.unsqueeze(-1)
-        u = torch.rand(ts.shape[0], seq_len, dtype=ts.dtype, device=ts.device)
-        lo = torch.zeros_like(u)
-        hi = (tcol + 14.0 * tcol.sqrt()).expand_as(u).contiguous()
-        for _ in range(HyperbolicHeatKernel._EXACT_D3_BISECT):
-            mid = 0.5 * (lo + hi)
-            below = HyperbolicHeatKernel._radial_cdf_exact_d3(mid, tcol) < u
-            lo = torch.where(below, mid, lo)
-            hi = torch.where(below, hi, mid)
-        return 0.5 * (lo + hi)
+        # Written in PHYSICAL coordinates: rho = R rho_1(t/R^2) = || N((t/R) e_1,
+        # t I_3) ||, so the spread is sqrt(t) at every curvature and only the
+        # MEAN carries K -- `kappa = 1/R = sqrt|K|` is the noncentrality per unit
+        # sqrt(t).
+        kappa = 1.0 / GeoUtils._curvature_scale(gaussian_curvature)
+        if torch.is_tensor(kappa):
+            z = torch.randn(
+                ts.shape[0], seq_len, kappa.numel(), 3, dtype=ts.dtype, device=ts.device
+            ) * ts.sqrt().view(-1, 1, 1, 1)
+            mean = ts.view(-1, 1, 1) * kappa
+        else:
+            z = torch.randn(
+                ts.shape[0], seq_len, 3, dtype=ts.dtype, device=ts.device
+            ) * ts.sqrt().view(-1, 1, 1)
+            mean = ts.view(-1, 1) * kappa
+        # The shift goes on e_1 ALONE: the law depends on the mean only through
+        # its norm, so spreading `t kappa` over all three components would
+        # inflate the noncentrality by sqrt(3).
+        z[..., 0] = z[..., 0] + mean
+        return z.norm(dim=-1)
 
     @staticmethod
     def radial_cdf(ts: torch.FloatTensor, d: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1447,9 +1526,11 @@ class HyperbolicHeatKernel(GeoUtils):
             output_coord (`str`, *optional*, defaults to `Coordinate.HYPERBOLIC_POLAR`):
                 `Coordinate.HYPERBOLIC_POLAR` or `Coordinate.CARTESIAN`.
             prod_factor_dim (`List[int]`, *optional*):
-                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`.
+                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`
+                and must all be EQUAL, so the boundary axis splits by a reshape.
             prod_factor_gaussian_curvature (`List[float]`, *optional*):
-                Curvature `K_i < 0` of each factor; same length as `prod_factor_dim`.
+                Curvature `K_i < 0` of each factor, free to differ per factor;
+                same length as `prod_factor_dim`.
                 Both lists default together to the single factor `[embedding_size]` at
                 `[-1.0]`, which reproduces [`poincare_bridge`]; passing only one raises.
 
@@ -1482,30 +1563,34 @@ class HyperbolicHeatKernel(GeoUtils):
             assert factor_curv < 0.0, f"Hyperbolic curvature should be negative"
             assert factor_dim >= 2, f"Each product factor needs dim >= 2, not {factor_dim}"
 
+        assert len(set(prod_factor_dim)) == 1, (
+            f"poincare_bridge_prod needs one shared factor dimension; got {prod_factor_dim}."
+        )
+        factor_dim = prod_factor_dim[0]
+        num_factors = len(prod_factor_dim)
         seq_len = targets.shape[-1]
         tiny = torch.finfo(ts.dtype).tiny
-        x = word_embedding[targets].to(ts.dtype)
-        rhos, us, offset = [], [], 0
-        for factor_dim, factor_curv in zip(prod_factor_dim, prod_factor_gaussian_curvature):
-            x_i = x[..., offset:offset + factor_dim]
-            offset += factor_dim
-            x_i = x_i / x_i.norm(dim=-1, keepdim=True).clamp_min(tiny)
-            rho_i = HyperbolicHeatKernel.sample_radial(ts, factor_dim, seq_len, factor_curv)
-            u_i = HyperbolicHeatKernel._angular_boost(rho_i, factor_dim, factor_curv)
-            rhos.append(rho_i)
-            us.append(HyperbolicHeatKernel._reflect_to_target(u_i, x_i))
+        # `(batch, seq, factor, dim)` throughout: one shared factor dimension
+        # splits the concatenated boundary axis by a reshape, so the per-factor
+        # python loop becomes a tensor op over the factor axis. `_angular_boost`,
+        # `_reflect_to_target` and `hyperbolic_polar_to_poincare_cartesian` are
+        # elementwise in the leading axes and take a PER-FACTOR curvature tensor
+        # (`_curvature_scale` broadcasts), so they need the factor axis only.
+        x = word_embedding[targets].to(ts.dtype).unflatten(-1, (num_factors, factor_dim))
+        x = x / x.norm(dim=-1, keepdim=True).clamp_min(tiny)
+        curvs = ts.new_tensor(prod_factor_gaussian_curvature)
+        # One call covers every factor: sample_radial takes the per-factor
+        # curvature vector and returns (batch, seq, factor) directly.
+        rhos = HyperbolicHeatKernel.sample_radial(ts, factor_dim, seq_len, curvs)
+
+        us = HyperbolicHeatKernel._angular_boost(rhos, factor_dim, curvs)
+        us = HyperbolicHeatKernel._reflect_to_target(us, x)
 
         if output_coord == Coordinate.CARTESIAN:
-            return torch.cat(
-                [
-                    GeoUtils.hyperbolic_polar_to_poincare_cartesian(
-                        rho_i, u_i, gaussian_curvature=factor_curv
-                    )
-                    for rho_i, u_i, factor_curv in zip(rhos, us, prod_factor_gaussian_curvature)
-                ],
-                dim=-1,
-            )
-        return torch.stack(rhos, dim=-1), torch.cat(us, dim=-1)
+            return GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+                rhos, us, gaussian_curvature=curvs,
+            ).flatten(-2)
+        return rhos, us.flatten(-2)
 
     @staticmethod
     def geodesic(
