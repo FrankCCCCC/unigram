@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""init_test_3d_refactor_new sweep: TRAINED model on a single H^3 at three curvatures.
+"""init_test_3d_refactor_new sweep: TRAINED model on a single H^3, curvature swept.
 
 Grid is exactly experiments/init_test_3d_refactor_new/setup.md:
 
     ps                     {naive_ps, cmplx_ps, c1e3_exp1.0, c1e4_exp1.0}
-    gaussian_curvature     {-1.0, -10.0, -0.01}
+    gaussian_curvature     {-10.0, -4.0, -3.0, -2.0, -1.0, -0.5, -0.1, -0.05, -0.01}
     loss_proposal_type     {exp}
     loss_proposal_exp_rate {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
     loss_geometry          {cross_entropy, poincare_polar}
@@ -13,7 +13,7 @@ Grid is exactly experiments/init_test_3d_refactor_new/setup.md:
            gradient_clip_val=1.0, test_size=4e6, batch_size=2048,
            ref_proposal_type=exp, ref_proposal_exp_rate=0.1
 
-4 x 3 x 7 x 2 x 3 = 504 runs, one SLURM job each.
+4 x 9 x 7 x 2 x 3 = 1512 runs, one SLURM job each.
 
 Curvature is the new axis relative to init_refactor_3d, and it is not a cosmetic
 rescaling: K fixes the radius R = 1/sqrt(-K), and the heat-time ceiling
@@ -42,7 +42,8 @@ PROJECT = Project(
     name="init_test_3d_refactor_new",
     mode="tnb",
     hyper_dim=3,
-    curvatures=["-1.0", "-10.0", "-0.01"],
+    curvatures=["-10.0", "-4.0", "-3.0", "-2.0", "-1.0",
+                "-0.5", "-0.1", "-0.05", "-0.01"],
 )
 
 if __name__ == "__main__":

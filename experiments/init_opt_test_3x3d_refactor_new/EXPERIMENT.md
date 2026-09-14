@@ -58,7 +58,11 @@ sample size.
 
 ## Design
 
-Grid from `setup.md`: 4 × 7 × 2 × 3 = **168 runs**, one SLURM job each.
+Grid from `setup.md`: 4 × 10 × 7 × 2 × 3 = **1680 runs**, one SLURM job each.
+The per-factor curvature vector is the swept geometry: one mixed vector
+`[-0.01,-10,-1]` (the 168 cells that ran first) and nine homogeneous ones
+`[K,K,K]` for `K ∈ {-0.01, -0.05, -0.1, -0.5, -1, -2, -3, -4, -10}`, which pair
+one-for-one with the single-manifold project's nine curvatures.
 
 | variable | values |
 |---|---|
@@ -73,8 +77,11 @@ Fixed: `mode=opt`, `prod_factor_dim=[3,3,3]`,
 `max_steps` are inert (no `trainer.fit`) but stay in `run_name` so cells pair 1:1 with
 the trained twin.
 
-The geometry is fixed, so it lives in the project name and `run_name` carries no `_k-`
-field — `experiments/report.py` parses it unchanged.
+The swept geometry lives in `run_name`'s `_k-` field. A homogeneous vector
+collapses to its shared scalar (`_k--1.0`), the mixed one is `x`-joined
+(`_k--0.01x-10.0x-1.0`); both are bracket-free because the tag travels inside
+the `folder=` hydra override and hydra reads a bare `[` as a list literal.
+`experiments/report.py` parses it unchanged.
 
 ## GPU allocation
 
@@ -89,7 +96,8 @@ worth the risk of losing a cell to a slow cold start.
 
 ## Wall clock (expected)
 
-~**6 GPU-h** for the full 168-cell grid — the cheapest of the four projects. Run it and
+~**61 GPU-h** for the full 1680-cell grid — still the cheapest per cell of the four
+projects. Run it and
 `init_opt_test_3d_refactor_new` first: every conclusion the two trained projects draw is
 conditioned on what these two report.
 

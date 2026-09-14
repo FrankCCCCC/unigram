@@ -49,6 +49,43 @@ ENTROPY = {"naive_ps": 0.500288, "cmplx_ps": 1.666363, "cmplx_ps1": 2.298544,
 # (measured: L(t) ~ exp(-0.152 t), so the cliff sits at 2*0.152).
 VARIANCE_CLIFF = 0.304
 
+# The reference proposal setup.md pins (exp(0.1)) is a rate in PHYSICAL time t,
+# but every curvature-dependent quantity is a function of the DIMENSIONLESS time
+# t/R^2 with R = 1/sqrt(-K) (geo_bridge sample_radial draws R*rho_1(t/R^2), and
+# the loss only ever sees u = rho/R). The reference pass therefore runs at an
+# EFFECTIVE rate of REF_RATE/|K|, not REF_RATE, and flat curvature pushes it past
+# the cliff above: 1.0 at K = -0.1, 2.0 at K = -0.05, 10.0 at K = -0.01.
+#
+# Measured on the 1512-cell Bayes-optimal grid output/init_opt_test_3d_refactor_new,
+# where wnelbo_ref is provably >= H(p) because the posterior is exact -- mean gap
+# to H(p) over all 42 (lg, rate, seed) cells per curvature:
+#     K <= -0.1   within +-0.006 of H(p)      (sound)
+#     K  = -0.05  -0.011 / -0.028 / -0.009    (biased low)
+#     K  = -0.01  -0.141 / -0.423 / -0.274    (invalid)
+# for naive_ps / cmplx_ps / c1e3=c1e4. The model is fine there: the same runs'
+# test_wloss at an effective rate of 1.0 reads 0.4995 for naive_ps, i.e. the
+# integral really is H(p) and only the pinned reference misreads it.
+#
+# A product manifold takes its ceiling from the SHARPEST factor (see k_sort_key),
+# so the mixed vector [-0.01,-10.0,-1.0] is SOUND (+0.002) while a homogeneous
+# [-0.01,-0.01,-0.01] is not. setup.md pins ref_proposal_exp_rate = 0.1, so the
+# sweeps run as specified and the affected rows are flagged rather than dropped.
+REF_RATE = 0.1
+# Two tiers, set from the FINISHED Bayes-optimal controls (1680 + 1512 cells), where
+# wnelbo_ref is provably >= H(p) so any deficit is the estimator's. Mean gap to H(p):
+#
+#   eff rate   single manifold D=3          product D=9 (3 factors)
+#   <= 1.0     within +-0.006  (sound)      within +-0.005  (sound)
+#   2.0        -0.011 / -0.028 / -0.009     -0.002 / -0.000 / -0.001   <- D=3 biased, D=9 SOUND
+#   10.0       -0.141 / -0.423 / -0.274     -0.032 / -0.036 / -0.048   <- both invalid
+#
+# So the effective rate alone does not decide it: more factors identify the target
+# faster and rescue the estimator at the same rate. Hence CHECK (consult the mode=opt
+# control at the same (ps, K) before quoting) below 10, and SEVERE at or above it,
+# where every configuration measured is invalid.
+REF_EFF_CHECK = 1.0
+REF_EFF_SEVERE = 10.0
+
 # setup.md column order -> (mean key, per-sample std key or None).
 # trainer.BaseTrainer.STD_KEYS records a std for the three WEIGHTED quantities
 # only, so the unweighted nelbo_ref / ce_ref have no per-sample variance in any
@@ -77,12 +114,39 @@ PS_ORDER = ["naive_ps", "cmplx_ps", "cmplx_ps1",
 # hand, not by this script, so it is carried across a regeneration verbatim.
 HANDWRITTEN_MARKER = "# Insights and conclusions"
 
-# `_k-<gaussian_curvature>` is optional: projects that sweep curvature put it in
-# the run name, projects whose geometry is fixed keep it in the project name.
+# `_k-<curvature>` is optional: projects that sweep curvature put it in the run
+# name, older projects whose geometry is fixed keep it in the project name. A
+# product manifold whose factors differ tags them `x`-joined, e.g.
+# `_k--0.01x-10.0x-1.0`; identical factors collapse to the shared scalar.
 RUN_RE = re.compile(
     r"^ps-(?P<ps>.+?)(?:_k-(?P<k>[^_]+))?_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
     r"_qref-(?P<qref>[^_]+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$"
 )
+
+
+def k_sort_key(k: str | None) -> tuple:
+    """Flattest curvature first; None (geometry fixed by project name) leads.
+
+    A product-manifold tag is a list of per-factor curvatures. It sorts by its
+    SHARPEST factor, because that is the one whose `_radial_t_max(d) * R^2`
+    ceiling main_refactor.py clamps the whole product to.
+    """
+    if k is None:
+        return (0, 0.0, "")
+    values = [float(v) for v in k.split("x")]
+    return (1, -min(values), k)
+
+
+def ref_effective_rate(k: str | None) -> float | None:
+    """Dimensionless rate the pinned reference proposal actually runs at.
+
+    `None` when the project's geometry is not in the run name (nothing to scale
+    by). A product takes its ceiling from the sharpest factor, so that is the
+    curvature that sets the effective rate.
+    """
+    if k is None:
+        return None
+    return REF_RATE / max(abs(float(v)) for v in k.split("x"))
 
 
 def rate_of(q: str) -> float:
@@ -173,6 +237,28 @@ def section_title(ps: str, k: str | None, steps: int, multi_step: bool) -> str:
     return f"{title}, Training Step {steps}" if multi_step else title
 
 
+def section_warning(k: str | None) -> list[str]:
+    """The ⚠ block for a curvature where the pinned reference pass is suspect."""
+    eff = ref_effective_rate(k)
+    if eff is None or eff <= REF_EFF_CHECK:
+        return []
+    head = (f"> ⚠ **`wnelbo_ref` is NOT a valid ELBO in this section.**"
+            if eff >= REF_EFF_SEVERE else
+            f"> ⚠ **Check `wnelbo_ref` against the `mode=opt` control before quoting it.**")
+    body = ([f"> Every configuration measured at this rate is invalid: the exact Bayes posterior",
+             f"> itself reads 0.03-0.42 nats BELOW `H(p)` here. Read these rows as a measurement",
+             f"> of the ESTIMATOR, not of the model or the geometry."]
+            if eff >= REF_EFF_SEVERE else
+            [f"> Past the ~{VARIANCE_CLIFF} cliff, the estimate CAN be truncation-biased low, but whether it",
+             f"> actually is depends on the factor count: at this rate the single manifold `H^3`",
+             f"> measures 0.009-0.028 nats below `H(p)` for the exact posterior while the 3-factor",
+             f"> product measures within 0.002 of it. Consult the matching `init_opt_test_*` cell."])
+    return [head,
+            f"> The pinned exp({REF_RATE}) reference runs here at an effective dimensionless rate of",
+            f"> **{eff:.3g}** — it is a rate in PHYSICAL time, while the bridge is a function of `t/R²`.",
+            ] + body + [""]
+
+
 def handwritten_tail(dest: Path) -> list[str]:
     """The hand-written trailer of an existing RESULTS.md, so regenerating the
     tables does not silently delete the analysis someone wrote under them."""
@@ -193,7 +279,7 @@ def main() -> None:
     ps_list.sort(key=lambda p: (PS_ORDER.index(p) if p in PS_ORDER else len(PS_ORDER), p))
     # Curvature sections run from flattest to sharpest; None is the single
     # "geometry fixed by the project name" section.
-    k_list.sort(key=lambda x: (x is not None, -float(x) if x is not None else 0.0))
+    k_list.sort(key=k_sort_key)
     rates = sorted({key[4] for key in cells}, key=rate_of)
     n_runs = sum(len(v["wnelbo_ref"]["mean"]) for v in cells.values()
                  if "wnelbo_ref" in v)
@@ -220,8 +306,16 @@ def main() -> None:
         "- These variances are NOT the `± std` these tables used to print. That was the",
         f"  across-seed spread of the mean, related by `± ≈ sqrt(variance / {TEST_SIZE:,})`.",
         f"- `!` marks loss proposals above the ~{VARIANCE_CLIFF} variance cliff, where the",
-        "  weighted estimator has infinite variance. The reference pass is pinned at",
-        "  exp(0.1) and stays valid, but training there is materially noisier.",
+        "  weighted estimator has infinite variance; training there is materially noisier.",
+        "- **The reference pass does NOT stay valid at every curvature.** Its rate is",
+        f"  pinned at exp({REF_RATE}) in PHYSICAL time, while the bridge is a function of the",
+        "  dimensionless `t/R²`, so its effective rate is `0.1/|K|` — past the cliff",
+        "  above once `|K| < 0.33`. Sections past it carry a ⚠: **severe** at an effective",
+        f"  rate >= {REF_EFF_SEVERE:.0f} (every configuration measured there is invalid — the exact posterior",
+        f"  reads below `H(p)`), **check** between {REF_EFF_CHECK:.0f} and {REF_EFF_SEVERE:.0f}, where it depends on the factor",
+        "  count: at rate 2 the single `H^3` is biased 0.009-0.028 nats low while the 3-factor",
+        "  product is within 0.002. A product is governed by its SHARPEST factor, so a mixed",
+        "  vector containing one sharp factor stays sound while an all-flat one may not.",
         "- `wce_ref` is dominated by rare extremes; treat its spread as indicative only.",
     ]
     if unparsed:
@@ -232,8 +326,9 @@ def main() -> None:
     for ps in ps_list:
         for k in k_list:
             for steps in steps_list:
-                out += ["---", "", section_title(ps, k, steps, multi_step), "",
-                        "Each cell: point-estimate mean / per-sample variance, "
+                out += ["---", "", section_title(ps, k, steps, multi_step), ""]
+                out += section_warning(k)
+                out += ["Each cell: point-estimate mean / per-sample variance, "
                         "averaged across 3 seeds", ""]
                 for lg, title in GEOMETRY_TITLE:
                     out += [f"**{title}**", ""]

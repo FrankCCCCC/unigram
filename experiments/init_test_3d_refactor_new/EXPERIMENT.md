@@ -3,7 +3,7 @@
 First sweep of **Gaussian curvature** as an experimental variable. `main_refactor.py`
 (the product-manifold trainer: `MLPLMRefactor` / `OptimalModelRefactor`,
 `Loss.weighted_loss_refactor`, `HyperbolicHeatKernel.poincare_bridge_prod`) is run on a
-single factor `H^3_K` at `K ∈ {-1.0, -10.0, -0.01}`.
+single factor `H^3_K` at `K ∈ {-10, -4, -3, -2, -1, -0.5, -0.1, -0.05, -0.01}`.
 
 Three sibling projects share the design:
 
@@ -66,7 +66,10 @@ trained optimum; they are here only to state what the full grid is expected to c
 
 ## Design
 
-Grid from `setup.md`: 4 × 3 × 7 × 2 × 3 = **504 runs**, one SLURM job each.
+Grid from `setup.md`: 4 × 9 × 7 × 2 × 3 = **1512 runs**, one SLURM job each.
+The three curvatures `{-1, -10, -0.01}` that bracket the range ran first (504
+cells, complete); the six that fill it in — `-4, -3, -2, -0.5, -0.1, -0.05` —
+were added afterwards so the breakdown can be *located* rather than bracketed.
 
 | variable | values |
 |---|---|
@@ -134,7 +137,8 @@ complete single-seed grid lands first, replicates at +100.
 
 ## Wall clock (expected)
 
-~**130 GPU-h** for the full grid (`c1e4` is 70% of it). Against the ~10–25 GPUs
+~**388 GPU-h** for the full 9-curvature grid (`c1e4` is 70% of it); ~259 GPU-h of
+that is the six added curvatures. Against the ~10–25 GPUs
 typically free on the two partitions, roughly a day. The sweep is idempotent and
 resumable — a cell with `test_metrics.json` or a live `squeue` entry is skipped — so
 partial progress costs nothing.

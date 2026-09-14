@@ -61,7 +61,11 @@ short to be evidence about the optimum.
 
 ## Design
 
-Grid from `setup.md`: 4 × 7 × 2 × 3 = **168 runs**, one SLURM job each.
+Grid from `setup.md`: 4 × 10 × 7 × 2 × 3 = **1680 runs**, one SLURM job each.
+The per-factor curvature vector is the swept geometry: one mixed vector
+`[-0.01,-10,-1]` (the 168 cells that ran first) and nine homogeneous ones
+`[K,K,K]` for `K ∈ {-0.01, -0.05, -0.1, -0.5, -1, -2, -3, -4, -10}`, which pair
+one-for-one with the single-manifold project's nine curvatures.
 
 | variable | values |
 |---|---|
@@ -75,9 +79,11 @@ Fixed: `mode=tnb`, `prod_factor_dim=[3,3,3]`,
 `gradient_clip_val=1.0`, `test_size=4e6`, `batch_size=2048`,
 `ref_proposal_type=exp`, `ref_proposal_exp_rate=0.1`.
 
-The geometry is fixed, so it lives in the **project name** and `run_name` carries no
-`_k-` field — byte-identical to `init_test`'s scheme, and `experiments/report.py` parses
-it unchanged.
+The swept geometry lives in `run_name`'s `_k-` field. A homogeneous vector
+collapses to its shared scalar (`_k--1.0`), the mixed one is `x`-joined
+(`_k--0.01x-10.0x-1.0`); both are bracket-free because the tag travels inside
+the `folder=` hydra override and hydra reads a bare `[` as a list literal.
+`experiments/report.py` parses it unchanged.
 
 `setup.md`'s result templates carry the four-step layout inherited from `init_test`; its
 Training section pins `max_steps` to **{20000}**, which is what is run.
@@ -100,12 +106,20 @@ Measured at batch 2048 on an RTX 6000 Ada, `D = 9`:
 | `c1e3_exp1.0` | 1 000 | 0.045 | 50 s | — | 3.01 |
 | `c1e4_exp1.0` | 10 000 | 0.290 | 160 s | 17.86 | **25.34** |
 
-**Sizing must use the `poincare_polar` column.** `pp` runs the ELBO geometry on the loss
-pass *and* the reference pass; `cross_entropy` runs it only on the reference. The gap is
-7.5 GiB at `c1e4`, and sizing on the `ce` measurement is exactly what cost two cells: two
-`c1e4` × `pp` jobs OOM'd on `kuleshov-compute-03`'s 24 GB A5000 at 23.5 GiB (in
-`horosphere_geometry`, `cos_half_sq = sums.square().sum(-1) / 4`) before the model was
-corrected.
+**Each geometry is sized on its own column** (`sweep_lib.peak_gb(ps, geom)`, since
+2026-09-09). `pp` runs the ELBO geometry on the loss pass *and* the reference pass;
+`cross_entropy` runs it only on the reference. The gap is 7.5 GiB at `c1e4`. Sizing a
+**`pp`** cell on the `ce` measurement is what cost two cells: two `c1e4` × `pp` jobs
+OOM'd on `kuleshov-compute-03`'s 24 GB A5000 at 23.5 GiB (in `horosphere_geometry`,
+`cos_half_sq = sums.square().sum(-1) / 4`).
+
+The converse error is just as expensive and is what this table used to cause: while
+`peak_gb` was keyed on `(V, D)` alone it handed every `ce` cell the `pp` figure, so the
+202 pending `c1e4` × `ce` cells were excluded from `kuleshov-compute-03` — a node on
+which 11 cells of exactly that configuration had **already completed** in ~1:58 each.
+They sat behind a 400-deep queue while those 10 A5000s idled. A `ce` cell at `c1e4`
+needs the longer `08:43:00` limit, because opening the A5000 makes it the slowest
+eligible node.
 
 `c1e4` at `D = 9` is the **only** cell in the four projects that does not fit every node:
 25.34 GiB × 1.15 clears both `desa-compute-01` (10.5 GiB) and `kuleshov-compute-03`
@@ -122,7 +136,8 @@ Ada / A6000 / A5000 / 2080 Ti) with a 1.5× margin: ~1 h 35 for V ≤ 1000, ~6 h
 
 ## Wall clock (expected)
 
-~**103 GPU-h** at the Ada rate for the full grid, of which `c1e4` is ~68 GPU-h; two to
+~**1029 GPU-h** at the Ada rate for the full 10-geometry grid, of which `c1e4` is
+~68%; ~900 GPU-h of that is the nine added homogeneous vectors. Two to
 three times that if the cells land on the slower cards. Idempotent and resumable, so it
 fills in over a day or two rather than in one sitting.
 
