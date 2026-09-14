@@ -3,7 +3,7 @@
 ---
 
 - Project name: ``init_test_log_vce_3d_refactor_new``
-- Use ``main_refactor.py`` and scripts ``script/train/ce_refactor.sh`` and ``script/train/pp_refactor.sh``
+- Use ``main_refactor.py`` and scripts ``script/train/vce_refactor.sh``
 
 ### Dataset
 - ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e4_exp1.0``}
