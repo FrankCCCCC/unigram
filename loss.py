@@ -943,22 +943,40 @@ class Loss:
         # direction reaches the target to full float64 precision, so a 1-ulp
         # wobble flips sin_half_sq between exactly 0 (weight `e^{2u}`) and
         # ~1e-32 (weight ~`e^{2u} 1e-32`).
-        sin_half_sq = (theta_m - xs).square().sum(-1) / 4
-        cos_half_sq = (theta_m + xs).square().sum(-1) / 4
+
+        # (V, M, d): every word's per-factor direction, so the minimum below
+        # ranges over the WHOLE vocabulary instead of reading the target row.
+        phis_m = phis.unflatten(-1, factor_shape)
+        phis_m = phis_m / phis_m.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
+        # (batch, seq, V, M) -- the vocabulary axis the min collapses.
+        sin_half_sq = (theta_m[:, :, None] - phis_m[None, None]).square().sum(-1) / 4
+        cos_half_sq = (theta_m[:, :, None] + phis_m[None, None]).square().sum(-1) / 4
+
         kappas = thetas.new_tensor(
             [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
         )
         # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps
         # (Invariant 4).
         us = (kappas * rhos).clamp_max(HyperBridge.RHO_MAX)
+
+        # Broadcast u over the vocabulary axis only for the log D below; the
+        # min puts the shape back to (batch, seq, M) before the weight sum.
+        us_b = us[:, :, None]
+
         # log D_x, with e^{+u} pulled out of the log exactly as
         # horosphere_geometry does: D_x itself spans e^{-u} .. e^{+u}, so forming
         # it in linear space overflows at u ~ 710 while its log never does. The
         # clamp keeps the log finite once BOTH terms underflow (u > ~372, where
         # sin_half_sq is exactly 0 on the target).
-        log_denoms = us + (
-            sin_half_sq + cos_half_sq * (-2 * us).exp()
+        log_denoms = us_b + (
+            sin_half_sq + cos_half_sq * (-2 * us_b).exp()
         ).clamp_min(tiny).log()
+
+        # min_v D_{e_v,m}, per factor. Minimising D maximises 1/D^2, so the
+        # result dominates the target's term factor by factor and the bound
+        # is preserved -- while no longer being a function of the target.
+        log_denoms = log_denoms.min(dim=2).values
+
         # sum_m (d_m-1)^2 kappa_m^2 / D_{x_m}^2, accumulated in log space. Each
         # summand reaches e^{2 RHO_MAX} ~ 1e304 on its own, so the linear sum has
         # no headroom left; combine with log CE before exponentiating so a

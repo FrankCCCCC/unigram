@@ -54,10 +54,14 @@ class LogCrossEntropyTests(unittest.TestCase):
         actual = Loss.bridge_loss_variational_crossentropy_refactor(
             logits, targets, rho, theta, embedding, dims, curvatures,
         )
-        xs = torch.nn.functional.normalize(embedding[targets].reshape(2, 3, 2, 3), dim=-1)
+        # D_{e_v,m} for EVERY word, then the per-factor minimum: the weight is
+        # a function of z_t alone, which is what keeps the Bayes posterior the
+        # minimiser (experiments/init_test_log_vce_3d_refactor_new/vce_bayes.md).
+        phis = torch.nn.functional.normalize(embedding.reshape(5, 2, 3), dim=-1)
         k2 = torch.tensor(curvatures, dtype=torch.float64).abs()
         u = rho * k2.sqrt()
-        denom = u.cosh() - u.sinh() * (xs * theta.reshape(2, 3, 2, 3)).sum(-1)
+        inner = (theta.reshape(2, 3, 2, 3)[:, :, None] * phis[None, None]).sum(-1)
+        denom = (u[:, :, None].cosh() - u[:, :, None].sinh() * inner).min(dim=2).values
         expected = torch.nn.functional.cross_entropy(
             logits.transpose(1, 2), targets, reduction='none',
         ) * (4 * k2 / denom.square()).sum(-1)
@@ -66,6 +70,50 @@ class LogCrossEntropyTests(unittest.TestCase):
         for a, b in zip(torch.autograd.grad(actual.sum(), inputs, retain_graph=True),
                         torch.autograd.grad(expected.sum(), inputs)):
             torch.testing.assert_close(a, b, rtol=1e-11, atol=1e-11)
+
+    def test_weight_only_grows_so_the_bound_survives(self):
+        """min_v D_{e_v,m} <= D_{x_m}, so the loss dominates the target-indexed
+        form it replaced -- Step B of the derivation stays an upper bound."""
+        torch.manual_seed(5)
+        dims, curvatures = [4], [-1.5]
+        embedding = torch.randn(7, 4, dtype=torch.float64)
+        theta = torch.nn.functional.normalize(
+            torch.randn(3, 2, 4, dtype=torch.float64), dim=-1)
+        rho = torch.rand(3, 2, 1, dtype=torch.float64) * 3
+        logits = torch.randn(3, 2, 7, dtype=torch.float64)
+        targets = torch.randint(0, 7, (3, 2))
+        actual = Loss.bridge_loss_variational_crossentropy_refactor(
+            logits, targets, rho, theta, embedding, dims, curvatures)
+        # the superseded target-indexed weight, computed directly
+        xs = torch.nn.functional.normalize(embedding[targets], dim=-1)
+        k2 = torch.tensor(curvatures, dtype=torch.float64).abs()
+        u = rho * k2.sqrt()
+        denom = u.cosh() - u.sinh() * (xs * theta).sum(-1, keepdim=True)
+        ce = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, 7), targets.reshape(-1), reduction="none").reshape(3, 2)
+        superseded = ce * ((dims[0] - 1) ** 2 * k2 / denom.square()).sum(-1)
+        self.assertTrue((actual >= superseded - 1e-12).all())
+
+    def test_weight_does_not_depend_on_the_target(self):
+        """The property the whole fix exists for: same z_t, different y, same
+        weight -- so the weighted CE stays proper for the Bayes posterior."""
+        torch.manual_seed(9)
+        dims, curvatures = [3], [-1.0]
+        embedding = torch.randn(6, 3, dtype=torch.float64)
+        theta = torch.nn.functional.normalize(
+            torch.randn(4, 1, 3, dtype=torch.float64), dim=-1)
+        rho = torch.rand(4, 1, 1, dtype=torch.float64) * 2
+        # Uniform logits make CE identical for every target, so any difference
+        # in the result would be the weight and nothing else.
+        logits = torch.zeros(4, 1, 6, dtype=torch.float64)
+        losses = [
+            Loss.bridge_loss_variational_crossentropy_refactor(
+                logits, torch.full((4, 1), y), rho, theta, embedding,
+                dims, curvatures)
+            for y in range(6)
+        ]
+        for other in losses[1:]:
+            torch.testing.assert_close(losses[0], other)
 
     def test_negative_tail_and_large_wrong_logit(self):
         for gap in (34.999, 35., 35.001, -1000.):
