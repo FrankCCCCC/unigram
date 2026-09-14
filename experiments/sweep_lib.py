@@ -6,7 +6,7 @@ The four projects init_{opt_,}test_{3d,3x3d}_refactor_new differ only in
 scheduling policy are identical -- so they live here once and each project's
 ``sweep.py`` supplies a :class:`Project` and calls :func:`main`.
 
-ORCHESTRATION ONLY: this submits ``script/train/{ce_redactor,pp_refactor}.sh``;
+ORCHESTRATION ONLY: this submits ``script/train/{ce,pp,vce}_refactor.sh``;
 it never inlines the trainer. Idempotent and resumable -- a cell is skipped when
 its ``test_metrics.json`` exists or its job name is already in ``squeue``.
 
@@ -33,7 +33,8 @@ PROPOSALS = ["exp"]
 EXP_RATES = ["0.01", "0.05", "0.1", "0.25", "0.5", "0.75", "1.0"]
 # abbreviation -> train script. The *_refactor scripts run main_refactor.py,
 # which is the only entry point with the product-manifold bridge.
-GEOMETRIES = {"ce": "script/train/ce_redactor.sh", "pp": "script/train/pp_refactor.sh"}
+GEOMETRIES = {"ce": "script/train/ce_refactor.sh", "pp": "script/train/pp_refactor.sh",
+              "vce": "script/train/vce_refactor.sh"}
 SEEDS = [0, 1, 2]
 MAX_STEPS = 20000
 LR = "0.001"
@@ -141,6 +142,15 @@ class Project:
     # projects are unaffected; a project that sweeps a different axis overrides.
     ps_list: list[str] = field(default_factory=lambda: list(PS_LIST))
     partition: str = PARTITION
+    # Objectives to sweep, as GEOMETRIES keys. The default is the two the
+    # original projects compare; a project studying one objective narrows it.
+    geometries: list[str] = field(default_factory=lambda: ["ce", "pp"])
+    # Time proposals. Both default to the plain `exp` the earlier projects ran,
+    # so their run names -- and hence their idempotency -- are unchanged;
+    # `Proposal.proposal` now gates `exp` behind `allowed_exp`, so a NEW project
+    # wants `stratified_exp`, whose per-batch strata cut the 1/q(t) variance.
+    proposals: list[str] = field(default_factory=lambda: list(PROPOSALS))
+    ref_proposal: str = REF_PROPOSAL
     # Single manifold H^hyper_dim: one run per swept curvature, and the
     # curvature goes in the run name. Product manifold: prod_dim / prod_curvature
     # are hydra list literals, the geometry is fixed and lives in the project
@@ -179,7 +189,7 @@ class Project:
         """
         k_tag = f"_k-{k}" if k is not None else ""
         return (f"ps-{ps}{k_tag}_lg-{geom}_q-{proposal}{rate}"
-                f"_qref-{REF_PROPOSAL}{REF_RATE}_lr{LR}_st{MAX_STEPS}_s{seed}")
+                f"_qref-{self.ref_proposal}{REF_RATE}_lr{LR}_st{MAX_STEPS}_s{seed}")
 
     def job_name(self, run: str) -> str:
         return f"{self.name}_{run}"
@@ -238,7 +248,7 @@ PROD_CURVATURE={self.prod_curvature} \\
 PS={ps} \\
 PROPOSAL={proposal} \\
 EXP_RATE={rate} \\
-REF_PROPOSAL={REF_PROPOSAL} \\
+REF_PROPOSAL={self.ref_proposal} \\
 REF_RATE={REF_RATE} \\
 MAX_STEPS={MAX_STEPS} \\
 SEED={seed} \\
@@ -276,7 +286,7 @@ def main(project: Project, doc: str | None = None) -> None:
     parser.add_argument("--curvatures", nargs="+", default=None,
                         help="subset of the swept curvatures (single-manifold projects)")
     parser.add_argument("--rates", nargs="+", default=EXP_RATES)
-    parser.add_argument("--geometries", nargs="+", default=list(GEOMETRIES))
+    parser.add_argument("--geometries", nargs="+", default=project.geometries)
     parser.add_argument("--seeds", nargs="+", type=int, default=SEEDS)
     parser.add_argument("--partition", default=project.partition)
     parser.add_argument("--force", action="store_true",
@@ -288,7 +298,7 @@ def main(project: Project, doc: str | None = None) -> None:
 
     ks = args.curvatures if args.curvatures is not None else project.geometry_cells
     cells = list(itertools.product(
-        args.ps, ks, args.geometries, PROPOSALS, args.rates, args.seeds))
+        args.ps, ks, args.geometries, project.proposals, args.rates, args.seeds))
     submitted = skipped_done = skipped_queued = 0
     first_body = None
     failed: list[tuple[str, str]] = []
@@ -339,7 +349,8 @@ def main(project: Project, doc: str | None = None) -> None:
     print(f"already finished  : {skipped_done}")
     print(f"already in squeue : {skipped_queued}")
     print(f"{'would submit' if args.dry_run else 'submitted'}      : {submitted}")
-    n_cols = len(ks) * len(args.geometries) * len(PROPOSALS) * len(args.rates) * len(args.seeds)
+    n_cols = (len(ks) * len(args.geometries) * len(project.proposals)
+              * len(args.rates) * len(args.seeds))
     gpu_h = n_cols * sum(
         STARTUP_SEC + project.steps() * SEC_PER_STEP[project.cost_key(p)]
         + TEST_SEC[project.cost_key(p)] for p in args.ps) / 3600

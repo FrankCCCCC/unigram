@@ -64,10 +64,10 @@ COLUMNS = [
 # the relation to the old across-seed spread in the header note.
 TEST_SIZE = 4_000_000
 NOT_RECORDED = "n/r"
-GEOMETRY_TITLE = [("ce", "CE"), ("pp", "Polar ELBO")]
+GEOMETRY_TITLE = [("ce", "CE"), ("pp", "Polar ELBO"), ("vce", "Variational CE")]
 # Dense table: one wloss column per loss_geometry. NELBO and CE are both wloss,
 # measured with loss_geometry set to poincare_polar / cross_entropy.
-DENSE_COLUMNS = [("NELBO", "pp"), ("CE", "ce")]
+DENSE_COLUMNS = [("NELBO", "pp"), ("CE", "ce"), ("VCE", "vce")]
 DENSE_NOTE = ("NELBO, CE are wloss while setting loss = polar_poincare_disk and "
               "cross_entropy respectively")
 # Section order follows setup.md, not the alphabetical directory listing.
@@ -80,14 +80,20 @@ HANDWRITTEN_MARKER = "# Insights and conclusions"
 # `_k-<gaussian_curvature>` is optional: projects that sweep curvature put it in
 # the run name, projects whose geometry is fixed keep it in the project name.
 RUN_RE = re.compile(
-    r"^ps-(?P<ps>.+?)(?:_k-(?P<k>[^_]+))?_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)"
-    r"_qref-(?P<qref>[^_]+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$"
+    r"^ps-(?P<ps>.+?)(?:_k-(?P<k>[^_]+))?_lg-(?P<lg>[^_]+)_q-(?P<q>.+?)"
+    r"_qref-(?P<qref>.+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$"
 )
 
 
+# `exp0.1`, `stratified_exp0.1`, `truncated_exp0.1` -- strip the whole proposal
+# name, not just the substring "exp", or `stratified_exp0.1` leaves `stratified_`.
+RATE_RE = re.compile(r"^[a-z_]*exp(?P<rate>.+)$")
+
+
 def rate_of(q: str) -> float:
+    m = RATE_RE.match(q)
     try:
-        return float(q.replace("exp", ""))
+        return float(m["rate"]) if m else float("nan")
     except ValueError:
         return float("nan")
 
@@ -154,14 +160,14 @@ def table(cells, ps: str, k: str | None, steps: int, lg: str,
     return lines
 
 
-def dense_table(cells, ps: str, k: str | None, steps: int,
-                rates: list[str], n_expected: int) -> list[str]:
-    header = "| Proposal | " + " | ".join(label for label, _ in DENSE_COLUMNS) + " |"
-    lines = [header, "|---" * (1 + len(DENSE_COLUMNS)) + "|"]
+def dense_table(cells, ps: str, k: str | None, steps: int, rates: list[str],
+                n_expected: int, columns: list[tuple[str, str]]) -> list[str]:
+    header = "| Proposal | " + " | ".join(label for label, _ in columns) + " |"
+    lines = [header, "|---" * (1 + len(columns)) + "|"]
     for q in rates:
         flag = " !" if rate_of(q) > VARIANCE_CLIFF else ""
         row = [q + flag]
-        for _, lg in DENSE_COLUMNS:
+        for _, lg in columns:
             bucket = cells.get((ps, k, steps, lg, q))
             row.append(fmt(bucket.get("wloss") if bucket else None, n_expected))
         lines.append("| " + " | ".join(row) + " |")
@@ -212,10 +218,15 @@ def main() -> None:
     # "geometry fixed by the project name" section.
     k_list.sort(key=k_sort_key)
     rates = sorted({key[4] for key in cells}, key=rate_of)
+    # Only the objectives this project actually swept get a section; a project
+    # that trains one of them must not report empty tables for the other two.
+    lg_seen = {key[3] for key in cells}
+    geometries = [(lg, title) for lg, title in GEOMETRY_TITLE if lg in lg_seen]
+    dense_columns = [(label, lg) for label, lg in DENSE_COLUMNS if lg in lg_seen]
     n_runs = sum(len(v["wnelbo_ref"]["mean"]) for v in cells.values()
                  if "wnelbo_ref" in v)
     total = (len(ps_list) * len(k_list) * len(steps_list)
-             * len(GEOMETRY_TITLE) * len(rates) * args.seeds)
+             * len(geometries) * len(rates) * args.seeds)
 
     out = [
         f"# {args.project} results",
@@ -252,7 +263,7 @@ def main() -> None:
                 out += ["---", "", section_title(ps, k, steps, multi_step), "",
                         "Each cell: point-estimate mean / per-sample variance, "
                         "averaged across 3 seeds", ""]
-                for lg, title in GEOMETRY_TITLE:
+                for lg, title in geometries:
                     out += [f"**{title}**", ""]
                     out += table(cells, ps, k, steps, lg, rates, args.seeds)
                     out += [""]
@@ -263,7 +274,8 @@ def main() -> None:
             for steps in steps_list:
                 out += ["---", "", section_title(ps, k, steps, multi_step), "",
                         DENSE_NOTE, ""]
-                out += dense_table(cells, ps, k, steps, rates, args.seeds)
+                out += dense_table(cells, ps, k, steps, rates, args.seeds,
+                                   dense_columns)
                 out += [""]
 
     dest = REPO_DIR / "experiments" / args.project / "RESULTS.md"
