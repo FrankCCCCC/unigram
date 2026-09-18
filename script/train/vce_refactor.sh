@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# ONE training run of the unigram model on the CROSS-ENTROPY objective.
+# ONE training run of the unigram model on the VARIATIONAL CROSS-ENTROPY
+# objective: the denominator-weighted denoising CE that upper-bounds the
+# shared-D_x angular path-KL (Loss.bridge_loss_variational_crossentropy_refactor).
 #
 # No sweeps or loops here: experiments/init_test/sweep.py builds the grid and
 # submits one SLURM job per cell, parameterizing this script via env vars.
@@ -25,9 +27,9 @@ cd "${REPO_DIR}"
 
 PYTHON="${PYTHON:-/home/sc3379/anaconda3/envs/sfm/bin/python}"
 PS="${PS:-naive_ps}"
-PROPOSAL="${PROPOSAL:-exp}"
+PROPOSAL="${PROPOSAL:-stratified_exp}"
 EXP_RATE="${EXP_RATE:-0.1}"
-REF_PROPOSAL="${REF_PROPOSAL:-exp}"
+REF_PROPOSAL="${REF_PROPOSAL:-stratified_exp}"
 REF_RATE="${REF_RATE:-0.1}"
 MAX_STEPS="${MAX_STEPS:-20000}"
 SEED="${SEED:-1}"
@@ -38,12 +40,12 @@ HYPER_DIM="${HYPER_DIM:-2}"
 CURVATURE="${CURVATURE:--1.0}"
 PROD_DIM="${PROD_DIM:-null}"
 PROD_CURVATURE="${PROD_CURVATURE:-null}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/init_test/ps-${PS}_lg-ce_q-${PROPOSAL}${EXP_RATE}_qref-${REF_PROPOSAL}${REF_RATE}_lr${LR}_st${MAX_STEPS}_s${SEED}}"
+OUTPUT_DIR="${OUTPUT_DIR:-output/init_test/ps-${PS}_lg-vce_q-${PROPOSAL}${EXP_RATE}_qref-${REF_PROPOSAL}${REF_RATE}_lr${LR}_st${MAX_STEPS}_s${SEED}}"
 EXTRA="${EXTRA:-}"
 
 # shellcheck disable=SC2086  # EXTRA is intentionally word-split
 exec "${PYTHON}" -u main_refactor.py \
-    loss_geometry=cross_entropy \
+    loss_geometry=var_cross_entropy \
     ps="${PS}" \
     lr="${LR}" \
     max_steps="${MAX_STEPS}" \

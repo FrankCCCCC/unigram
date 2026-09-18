@@ -6,7 +6,7 @@ The four projects init_{opt_,}test_{3d,3x3d}_refactor_new differ only in
 scheduling policy are identical -- so they live here once and each project's
 ``sweep.py`` supplies a :class:`Project` and calls :func:`main`.
 
-ORCHESTRATION ONLY: this submits ``script/train/{ce_redactor,pp_refactor}.sh``;
+ORCHESTRATION ONLY: this submits ``script/train/{ce,pp,vce}_refactor.sh``;
 it never inlines the trainer. Idempotent and resumable -- a cell is skipped when
 its ``test_metrics.json`` exists or its job name is already in ``squeue``.
 
@@ -33,7 +33,8 @@ PROPOSALS = ["exp"]
 EXP_RATES = ["0.01", "0.05", "0.1", "0.25", "0.5", "0.75", "1.0"]
 # abbreviation -> train script. The *_refactor scripts run main_refactor.py,
 # which is the only entry point with the product-manifold bridge.
-GEOMETRIES = {"ce": "script/train/ce_redactor.sh", "pp": "script/train/pp_refactor.sh"}
+GEOMETRIES = {"ce": "script/train/ce_refactor.sh", "pp": "script/train/pp_refactor.sh",
+              "vce": "script/train/vce_refactor.sh"}
 SEEDS = [0, 1, 2]
 MAX_STEPS = 20000
 LR = "0.001"
@@ -224,12 +225,31 @@ class Project:
 
     name: str
     mode: str  # "tnb" (train MLPLMRefactor) | "opt" (Bayes-optimal, no fit)
-    # `curvatures` is the swept geometry axis and always lands in the run name.
-    # Single manifold H^hyper_dim: a scalar K per run. Product manifold: prod_dim
-    # is a hydra list literal ("[3,3,3]") and each curvature is the matching
-    # per-factor list ("[-0.01,-10.0,-1.0]").
+    # Defaults reproduce the module-level grid/partition, so the four original
+    # projects are unaffected; a project that sweeps a different axis overrides.
+    ps_list: list[str] = field(default_factory=lambda: list(PS_LIST))
+    partition: str = PARTITION
+    # Objectives to sweep, as GEOMETRIES keys. The default is the two the
+    # original projects compare; a project studying one objective narrows it.
+    geometries: list[str] = field(default_factory=lambda: ["ce", "pp"])
+    # Time proposals. Both default to the plain `exp` the earlier projects ran,
+    # so their run names -- and hence their idempotency -- are unchanged;
+    # `Proposal.proposal` now gates `exp` behind `allowed_exp`, so a NEW project
+    # wants `stratified_exp`, whose per-batch strata cut the 1/q(t) variance.
+    proposals: list[str] = field(default_factory=lambda: list(PROPOSALS))
+    ref_proposal: str = REF_PROPOSAL
+    # `curvatures` is the swept geometry axis and lands in the run name whenever
+    # it is non-empty. Single manifold H^hyper_dim: a scalar K per run. Product
+    # manifold: prod_dim is a hydra list literal ("[3,3,3]") and each curvature
+    # is the matching per-factor list ("[-0.01,-10.0,-1.0]").
+    # `prod_curvature` is the OTHER way to spell a product: a geometry held FIXED
+    # while some other axis is swept. ProductCurvatureProject (see
+    # experiments/prod_manifold_acc_test/sweep.py) sets it per cell via
+    # dataclasses.replace, so it must stay a field even though the 3x3d projects
+    # now carry their vectors in `curvatures` instead.
     hyper_dim: int = 3
     prod_dim: str = "null"
+    prod_curvature: str = "null"
     curvatures: list[str] = field(default_factory=list)
 
     @property
@@ -240,9 +260,14 @@ class Project:
         return sum(int(d) for d in self.prod_dim.strip("[]").split(","))
 
     @property
-    def geometry_cells(self) -> list[str]:
-        """Curvature values to sweep: scalars, or per-factor list literals."""
-        return list(self.curvatures)
+    def geometry_cells(self) -> list[str | None]:
+        """Curvature values to sweep, or [None] when the geometry is fixed.
+
+        Scalars for a single manifold, per-factor list literals for a product.
+        [None] is the case where the geometry lives in the project name instead,
+        so nothing goes in the `_k-` slot.
+        """
+        return list(self.curvatures) if self.curvatures else [None]
 
     def out_root(self) -> Path:
         return Path("output") / self.name
@@ -259,8 +284,11 @@ class Project:
         share a directory with the new. experiments/report.py parses this back
         out.
         """
-        return (f"ps-{ps}_k-{curvature_tag(k)}_lg-{geom}_q-{proposal}{rate}"
-                f"_qref-{REF_PROPOSAL}{REF_RATE}_lr{LR}_st{MAX_STEPS}_s{seed}")
+        # curvature_tag keeps the tag bracket-free: it travels inside the
+        # `folder=` hydra override and hydra reads a bare `[` as a list literal.
+        k_tag = f"_k-{curvature_tag(k)}" if k is not None else ""
+        return (f"ps-{ps}{k_tag}_lg-{geom}_q-{proposal}{rate}"
+                f"_qref-{self.ref_proposal}{REF_RATE}_lr{LR}_st{MAX_STEPS}_s{seed}")
 
     def job_name(self, run: str) -> str:
         return f"{self.name}_{run}"
@@ -303,6 +331,15 @@ class Project:
             return PEAK_GB_CE[key]
         return PEAK_GB.get(key, PEAK_GB_DEFAULT)
 
+    def constraint(self, ps: str) -> str | None:
+        """SLURM `--constraint` for this cell, or None.
+
+        Node-name exclusion (below) only covers the nodes `NODE_GPU_GB` knows.
+        A project submitting to a partition wider than `thickstun,desa` gates on
+        the cluster's `gpu-low/gpu-mid/gpu-high` features instead.
+        """
+        return None
+
     def excluded_nodes(self, ps: str, geom: str = "pp") -> str:
         """Nodes whose GPU cannot hold this cell, comma-joined ('' if none)."""
         need = self.peak_gb(ps, geom) * GPU_MARGIN
@@ -316,8 +353,14 @@ class Project:
                 + (NICE_EXCLUDED + NICE_PER_EXCLUDED_NODE * (len(excl.split(",")) - 1)
                    if excl else 0))
 
-    def job_body(self, script: str, out_dir: Path, ps: str, k: str,
+    def job_body(self, script: str, out_dir: Path, ps: str, k: str | None,
                  proposal: str, rate: str, seed: int) -> str:
+        # Two ways a project spells a product geometry, and job_body serves both:
+        # the 3x3d projects sweep the per-factor vector, so it arrives as `k`;
+        # ProductCurvatureProject holds it in the `prod_curvature` field and
+        # passes k=None. Neither set -> the single-manifold path, "null".
+        prod_curvature = (k if (self.prod_dim != "null" and k is not None)
+                          else self.prod_curvature)
         return f"""
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export SLURM_JOB_NAME=bash
@@ -327,13 +370,13 @@ export PATH={CONDA_BIN}:$PATH
 cd {REPO_DIR}
 OUTPUT_DIR={out_dir} \\
 HYPER_DIM={self.hyper_dim} \\
-CURVATURE={k if self.prod_dim == "null" else "-1.0"} \\
+CURVATURE={k if (self.prod_dim == "null" and k is not None) else "-1.0"} \\
 PROD_DIM={self.prod_dim} \\
-PROD_CURVATURE={k if self.prod_dim != "null" else "null"} \\
+PROD_CURVATURE={prod_curvature} \\
 PS={ps} \\
 PROPOSAL={proposal} \\
 EXP_RATE={rate} \\
-REF_PROPOSAL={REF_PROPOSAL} \\
+REF_PROPOSAL={self.ref_proposal} \\
 REF_RATE={REF_RATE} \\
 MAX_STEPS={MAX_STEPS} \\
 SEED={seed} \\
@@ -367,13 +410,13 @@ def main(project: Project, doc: str | None = None) -> None:
                         help="print the plan and one sbatch script; submit nothing")
     parser.add_argument("--limit", type=int, default=None,
                         help="submit at most this many jobs (for a pilot)")
-    parser.add_argument("--ps", nargs="+", default=PS_LIST)
+    parser.add_argument("--ps", nargs="+", default=project.ps_list)
     parser.add_argument("--curvatures", nargs="+", default=None,
                         help="subset of the swept curvatures (single-manifold projects)")
     parser.add_argument("--rates", nargs="+", default=EXP_RATES)
-    parser.add_argument("--geometries", nargs="+", default=list(GEOMETRIES))
+    parser.add_argument("--geometries", nargs="+", default=project.geometries)
     parser.add_argument("--seeds", nargs="+", type=int, default=SEEDS)
-    parser.add_argument("--partition", default=PARTITION)
+    parser.add_argument("--partition", default=project.partition)
     parser.add_argument("--force", action="store_true",
                         help="resubmit cells whose test_metrics.json already exists")
     args = parser.parse_args()
@@ -383,7 +426,7 @@ def main(project: Project, doc: str | None = None) -> None:
 
     ks = args.curvatures if args.curvatures is not None else project.geometry_cells
     cells = list(itertools.product(
-        args.ps, ks, args.geometries, PROPOSALS, args.rates, args.seeds))
+        args.ps, ks, args.geometries, project.proposals, args.rates, args.seeds))
     submitted = skipped_done = skipped_queued = 0
     first_body = None
     failed: list[tuple[str, str]] = []
@@ -412,6 +455,7 @@ def main(project: Project, doc: str | None = None) -> None:
             time=project.time_limit(ps, geom),
             output=str(project.log_dir() / f"{name}_%j.log"),
             **({"exclude": excl} if (excl := project.excluded_nodes(ps, geom)) else {}),
+            **({"constraint": con} if (con := project.constraint(ps)) else {}),
         )
         nice = project.job_nice(ps, seed, geom)
         sbatch_cmd = f"sbatch --nice={nice}"
@@ -433,7 +477,8 @@ def main(project: Project, doc: str | None = None) -> None:
     print(f"already finished  : {skipped_done}")
     print(f"already in squeue : {skipped_queued}")
     print(f"{'would submit' if args.dry_run else 'submitted'}      : {submitted}")
-    n_cols = len(ks) * len(args.geometries) * len(PROPOSALS) * len(args.rates) * len(args.seeds)
+    n_cols = (len(ks) * len(args.geometries) * len(project.proposals)
+              * len(args.rates) * len(args.seeds))
     gpu_h = n_cols * sum(
         STARTUP_SEC + project.gpu_secs(p) for p in args.ps) / 3600
     print(f"estimated compute : ~{gpu_h:.0f} GPU-h for the FULL grid at the budgeted rate")
