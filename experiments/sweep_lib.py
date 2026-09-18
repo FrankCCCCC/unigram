@@ -153,8 +153,11 @@ class Project:
     ref_proposal: str = REF_PROPOSAL
     # Single manifold H^hyper_dim: one run per swept curvature, and the
     # curvature goes in the run name. Product manifold: prod_dim / prod_curvature
-    # are hydra list literals, the geometry is fixed and lives in the project
-    # name, and curvatures is empty.
+    # are hydra list literals. A product project can either FIX the curvature
+    # vector (prod_curvature set, curvatures empty -- the geometry lives in the
+    # project name) or SWEEP it, by listing `x`-joined vectors in `curvatures`
+    # (e.g. "-0.01x-10.0x-1.0"); job_body then rebuilds the hydra list per cell.
+    # report.py's k_sort_key already understands the `x`-joined tag.
     hyper_dim: int = 3
     curvatures: list[str] = field(default_factory=list)
     prod_dim: str = "null"
@@ -193,6 +196,18 @@ class Project:
 
     def job_name(self, run: str) -> str:
         return f"{self.name}_{run}"
+
+    def prod_curvature_for(self, k: str | None) -> str:
+        """The hydra list this cell's factors take.
+
+        A swept product cell carries its whole curvature VECTOR in `k` as the
+        `x`-joined tag; anything else keeps the project's fixed value. Without
+        this, sweeping `curvatures` on a product project would change only the
+        run NAME while every cell silently trained the same geometry.
+        """
+        if self.prod_dim == "null" or k is None:
+            return self.prod_curvature
+        return "[" + ",".join(k.split("x")) + "]"
 
     def cost_key(self, ps: str) -> tuple[int, int]:
         return (VOCAB[ps], self.total_dim)
@@ -244,7 +259,7 @@ OUTPUT_DIR={out_dir} \\
 HYPER_DIM={self.hyper_dim} \\
 CURVATURE={k if k is not None else "-1.0"} \\
 PROD_DIM={self.prod_dim} \\
-PROD_CURVATURE={self.prod_curvature} \\
+PROD_CURVATURE={self.prod_curvature_for(k)} \\
 PS={ps} \\
 PROPOSAL={proposal} \\
 EXP_RATE={rate} \\

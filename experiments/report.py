@@ -20,7 +20,7 @@ Note this is NOT the across-seed spread the tables used to print: that was a
 are related by  across-seed std ~= sqrt(variance / test_size).
 
 The headline metric is wnelbo_ref: the poincare-polar ELBO measured on the
-reference pass, whose proposal is pinned to exp(0.1) for every cell, so it is
+reference pass, whose proposal is pinned (the run name's `qref`) for every cell, so it is
 comparable across cells TRAINED at different loss proposal rates. It is bounded
 below by H(p) -- a value under H(p) means the estimator, not the model, is at
 fault.
@@ -227,6 +227,11 @@ def main() -> None:
                  if "wnelbo_ref" in v)
     total = (len(ps_list) * len(k_list) * len(steps_list)
              * len(geometries) * len(rates) * args.seeds)
+    # The reference proposal is pinned per project, not per cell; name the one(s)
+    # the runs actually used, e.g. `exp(0.1)` or `stratified_exp(0.1)`.
+    qrefs = sorted({f"{m['qref'][:m['qref'].rfind('exp') + 3]}({rate_of(m['qref']):g})"
+                    for p in (REPO_DIR / "output" / args.project).iterdir()
+                    if (m := RUN_RE.match(p.name))})
 
     out = [
         f"# {args.project} results",
@@ -249,7 +254,7 @@ def main() -> None:
         f"  across-seed spread of the mean, related by `± ≈ sqrt(variance / {TEST_SIZE:,})`.",
         f"- `!` marks loss proposals above the ~{VARIANCE_CLIFF} variance cliff, where the",
         "  weighted estimator has infinite variance. The reference pass is pinned at",
-        "  exp(0.1) and stays valid, but training there is materially noisier.",
+        f"  {', '.join(qrefs)} and stays valid, but training there is materially noisier.",
         "- `wce_ref` is dominated by rare extremes; treat its spread as indicative only.",
     ]
     if unparsed:
