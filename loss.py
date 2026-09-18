@@ -20,6 +20,8 @@ class LossGeometry:
     HORO_CROSS_ENTROPY: str = "horo_cross_entropy"
     CROSS_ENTROPY: str = "cross_entropy"
     VAR_CROSS_ENTROPY: str = "var_cross_entropy"
+    VAR_ONE_NORM: str = "var_one_norm"
+    VAR_BRIER: str = "var_brier"
 
 @dataclass
 class FlowPath:
@@ -985,6 +987,335 @@ class Loss:
         log_weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1)
         return (log_weight + log_ce).exp()
 
+    """
+    Loss of arbitary dimension Poincare Disk, Variational 1-Norm
+    """
+    @staticmethod
+    def bridge_loss_variational_one_norm_refactor(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Denominator-weighted squared 1-norm: an UPPER BOUND on the shared-`D_x`
+        angular path-KL, and a tighter one than
+        `bridge_loss_variational_crossentropy_refactor`.
+
+        Product-manifold form of slides/aug26_2026, "Weighted CE Upper-Bounds the
+        Hyperbolic Path-KL", stopped before its Pinsker step. With unit boundary
+        rows `e_v`, `x_m = e_{y,m}` and `xhat_m = sum_v p_v e_{v,m}`, the
+        orthogonal projector `P_theta` and `||E^T a||_2 <= ||a||_1` give the
+        embedding bound
+
+            ||P_theta (x_m - xhat_m)||^2 <= ||delta_y - p||_1^2 = 4 (1 - p_y)^2,
+
+        which turns factor m's shared-`D_x` angular rate
+        `(d_m-1)^2 kappa_m^2 / (2 D_{x_m}^2) ||P_theta (x_m - xhat_m)||^2` into a
+        term whose only model-dependent part no longer depends on m. Summing the
+        independent factors, with `D_{x_m}` lowered to `min_v D_{e_v,m}` as in the
+        variational CE:
+
+            1/2 ||delta_y - p||_1^2 * sum_m (d_m - 1)^2 kappa_m^2 / min_v D_{e_v,m}^2,
+            D_{e_v,m} = cosh(u_m) - sinh(u_m) <e_{v,m}, theta_m>,   u_m = kappa_m rho_m.
+
+        Pinsker (`||delta_y - p||_1^2 <= 2 CE(y, p)`) is the only step dropped, so
+        this never exceeds the variational CE; as `p_y -> 1` the CE falls like
+        `1 - p_y` but this like `2 (1 - p_y)^2`. The price is properness: for
+        V >= 3 the posterior expectation `sum_y q_y (1 - p_y)^2` is minimised by
+        `p_y = max(0, 1 - c / q_y)` (`c` normalises), sharper than `q` and zero
+        on words with `q_y <= c`, so the Bayes posterior is NOT this loss's
+        optimum even though the weight is target-free.
+
+        Args:
+            logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(batch_size, seq_len, prod_factor_num)` or `(batch_size, seq_len,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`):
+                Boundary table. Only the target row is read, and only through
+                its per-factor directions, so the row scale is irrelevant.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension of each factor; they must all be EQUAL here. Both
+                lists `None` means the single factor `[embedding_dim]` at
+                `[-1.0]`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_m < 0` of each factor, free to differ per factor.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
+        """
+        (batch_size, seq_len) = targets.shape
+        assert(logits.shape[:2] == (batch_size, seq_len))
+        V = logits.shape[-1]
+        embedding_size = thetas.shape[-1]
+        assert(thetas.shape == (batch_size, seq_len, embedding_size))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert(tuple(word_embedding.shape) == (V, embedding_size))
+        if rhos.ndim == 2:
+            rhos = rhos[..., None]
+        dims, curvatures = HyperbolicModelBase.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        assert(rhos.shape == (batch_size, seq_len, len(dims)))
+        # ONE shared factor dimension, so the concatenated boundary axis splits
+        # by a reshape and the whole loss is plain tensor ops on a
+        # (batch, seq, factor, dim) view -- no per-factor bookkeeping at all.
+        assert(len(set(dims)) == 1), (
+            "bridge_loss_variational_one_norm_refactor needs one shared factor "
+            f"dimension; got prod_factor_dim={dims}."
+        )
+        factor_shape = (len(dims), dims[0])
+        tiny = torch.finfo(torch.float64).tiny
+
+        # ||delta_y - p||_1 = (1 - p_y) + sum_{v != y} p_v = 2 (1 - p_y), and
+        # 1 - p_y = sigmoid(logsumexp_{v != y}(logit_v - logit_y)). Taking the log
+        # from the logit gaps keeps 1 - p_y and its gradient where
+        # 1 - softmax(logits)_y rounds to 0, before the potentially huge geometric
+        # weight amplifies them; logsigmoid is accurate in both tails, so unlike
+        # the log CE no branch is needed.
+        logits64 = logits.to(torch.float64)
+        gaps = logits64 - logits64.gather(-1, targets[..., None])
+        gaps = gaps.scatter(-1, targets[..., None], float('-inf'))
+        log_one_norm = math.log(2.0) + torch.nn.functional.logsigmoid(
+            torch.logsumexp(gaps, dim=-1)
+        )
+
+        phis = word_embedding.to(torch.float64)
+        # Only the TARGET endpoint enters D_x, and only through its per-factor
+        # directions -- so the row scale of `word_embedding` never matters.
+        xs = phis[targets].unflatten(-1, factor_shape)
+        theta_m = thetas.unflatten(-1, factor_shape)
+        # Per-factor sphere S^{d_m-1}: a per-factor SLICE of an embedding row is
+        # not unit-norm even when the full row is, and the half-angle identities
+        # below need UNIT x_m.
+        xs = xs / xs.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
+        #   sin^2(a/2) = (1 - <x_m, theta_m>) / 2 = ||theta_m - x_m||^2 / 4
+        #   cos^2(a/2) = (1 + <x_m, theta_m>) / 2 = ||theta_m + x_m||^2 / 4
+        # in the cancellation-free difference form: evaluating 1 - <x_m, theta_m>
+        # directly collapses to 0 once the bridge direction is within ~1e-8 of
+        # the target, and D_x with it (Invariant 5). Contracting the factor's own
+        # axis also keeps the summation order FIXED -- `index_add` over the
+        # concatenated axis would be equivalent in exact arithmetic, but its CUDA
+        # atomics leave that order undefined, and past `u ~ 37` the bridge
+        # direction reaches the target to full float64 precision, so a 1-ulp
+        # wobble flips sin_half_sq between exactly 0 (weight `e^{2u}`) and
+        # ~1e-32 (weight ~`e^{2u} 1e-32`).
+
+        # (V, M, d): every word's per-factor direction, so the minimum below
+        # ranges over the WHOLE vocabulary instead of reading the target row.
+        phis_m = phis.unflatten(-1, factor_shape)
+        phis_m = phis_m / phis_m.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
+        # (batch, seq, V, M) -- the vocabulary axis the min collapses.
+        sin_half_sq = (theta_m[:, :, None] - phis_m[None, None]).square().sum(-1) / 4
+        cos_half_sq = (theta_m[:, :, None] + phis_m[None, None]).square().sum(-1) / 4
+
+        kappas = thetas.new_tensor(
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+        )
+        # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps
+        # (Invariant 4).
+        us = (kappas * rhos).clamp_max(HyperBridge.RHO_MAX)
+
+        # Broadcast u over the vocabulary axis only for the log D below; the
+        # min puts the shape back to (batch, seq, M) before the weight sum.
+        us_b = us[:, :, None]
+
+        # log D_x, with e^{+u} pulled out of the log exactly as
+        # horosphere_geometry does: D_x itself spans e^{-u} .. e^{+u}, so forming
+        # it in linear space overflows at u ~ 710 while its log never does. The
+        # clamp keeps the log finite once BOTH terms underflow (u > ~372, where
+        # sin_half_sq is exactly 0 on the target).
+        log_denoms = us_b + (
+            sin_half_sq + cos_half_sq * (-2 * us_b).exp()
+        ).clamp_min(tiny).log()
+
+        # min_v D_{e_v,m}, per factor. Minimising D maximises 1/D^2, so the
+        # result dominates the target's term factor by factor and the bound
+        # is preserved -- while no longer being a function of the target.
+        log_denoms = log_denoms.min(dim=2).values
+
+        # sum_m (d_m-1)^2 kappa_m^2 / D_{x_m}^2, accumulated in log space. Each
+        # summand reaches e^{2 RHO_MAX} ~ 1e304 on its own, so the linear sum has
+        # no headroom left; combine with log ||delta_y - p||_1^2 before
+        # exponentiating so a representable weighted loss survives even when the
+        # weight overflows.
+        dim_kappas = thetas.new_tensor([float(factor_dim - 1) for factor_dim in dims]) * kappas
+        log_weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1)
+        # 1/2 ||delta_y - p||_1^2 * weight: the path-KL rate's 1/2, which the
+        # variational CE cancels against Pinsker's 2, stays here.
+        return (log_weight + 2 * log_one_norm - math.log(2.0)).exp()
+
+    """
+    Loss of arbitary dimension Poincare Disk, Variational Brier
+    """
+    @staticmethod
+    def bridge_loss_variational_brier_refactor(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Denominator-weighted scaled Brier score: an UPPER BOUND on the
+        shared-`D_x` angular path-KL whose minimiser is the Bayes posterior.
+
+        `bridge_loss_variational_one_norm_refactor` bounds factor m's shared-`D_x`
+        angular rate `(d_m-1)^2 kappa_m^2 / (2 D_{x_m}^2) ||P_theta (x_m - xhat_m)||^2`
+        through `||P_theta (x_m - xhat_m)||^2 <= ||delta_y - p||_1^2 = 4 (1 - p_y)^2`,
+        which only sees `p_y` and so is not proper for V >= 3. The squared 2-norm
+        also sees how the wrong mass is spread: with `r_v = p_v / (1 - p_y)` over
+        the words `v != y`,
+
+            ||delta_y - p||_2^2 = (1 - p_y)^2 (1 + ||r||^2) >= (1 - p_y)^2 V / (V - 1),
+
+        so `||delta_y - p||_1^2 <= c ||delta_y - p||_2^2` with `c = 4 (V - 1) / V`,
+        the smallest such constant (equality when the wrong mass is spread
+        evenly). With the 1-norm loss's target-free weight, the loss is
+
+            c/2 ||delta_y - p||_2^2 * sum_m (d_m - 1)^2 kappa_m^2 / min_v D_{e_v,m}^2,
+            D_{e_v,m} = cosh(u_m) - sinh(u_m) <e_{v,m}, theta_m>,   u_m = kappa_m rho_m,
+
+        which is the 1-norm loss times `(V - 1) / V (1 + ||r||^2)`, a factor in
+        `[1, 2 (V - 1) / V]`. It is strictly proper:
+        `E_q ||delta_y - p||_2^2 = ||p - q||_2^2 + 1 - ||q||_2^2`, a flat,
+        frequency-blind regret, and the weight does not depend on the target, so
+        at every `z_t` the unique minimiser is the Bayes posterior. Like the
+        1-norm loss it falls like `(1 - p_y)^2` as `p_y -> 1`, where the
+        variational CE falls like `1 - p_y`; it is not below the variational CE
+        everywhere, though (0.9 vs log 2 per unit weight at V = 10,
+        p = (0.5, 0.5, 0, ...)).
+
+        Args:
+            logits (`torch.Tensor` of shape `(batch_size, seq_len, V)`):
+                Log-posterior over words.
+            targets (`torch.LongTensor` of shape `(batch_size, seq_len,)`):
+                Target word ids.
+            rhos (`torch.Tensor` of shape `(batch_size, seq_len, prod_factor_num)` or `(batch_size, seq_len,)`):
+                Intrinsic radial coordinate of each product factor.
+            thetas (`torch.Tensor` of shape `(batch_size, seq_len, embedding_dim)`):
+                Per-factor unit boundary directions, concatenated.
+            word_embedding (`torch.FloatTensor` of shape `(V, embedding_dim)`):
+                Boundary table. Only the target row is read, and only through
+                its per-factor directions, so the row scale is irrelevant.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension of each factor; they must all be EQUAL here. Both
+                lists `None` means the single factor `[embedding_dim]` at
+                `[-1.0]`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_m < 0` of each factor, free to differ per factor.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size, seq_len)`: per-sample loss, float64.
+        """
+        (batch_size, seq_len) = targets.shape
+        assert(logits.shape[:2] == (batch_size, seq_len))
+        V = logits.shape[-1]
+        embedding_size = thetas.shape[-1]
+        assert(thetas.shape == (batch_size, seq_len, embedding_size))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert(tuple(word_embedding.shape) == (V, embedding_size))
+        if rhos.ndim == 2:
+            rhos = rhos[..., None]
+        dims, curvatures = HyperbolicModelBase.prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        assert(rhos.shape == (batch_size, seq_len, len(dims)))
+        # ONE shared factor dimension, so the concatenated boundary axis splits
+        # by a reshape and the whole loss is plain tensor ops on a
+        # (batch, seq, factor, dim) view -- no per-factor bookkeeping at all.
+        assert(len(set(dims)) == 1), (
+            "bridge_loss_variational_brier_refactor needs one shared factor "
+            f"dimension; got prod_factor_dim={dims}."
+        )
+        factor_shape = (len(dims), dims[0])
+        tiny = torch.finfo(torch.float64).tiny
+
+        # ||delta_y - p||_2^2 = (1 - p_y)^2 (1 + ||r||^2), both factors from the
+        # logit gaps. 1 - p_y = sigmoid(logsumexp_{v != y}(logit_v - logit_y))
+        # keeps 1 - p_y and its gradient where 1 - softmax(logits)_y rounds to 0,
+        # before the potentially huge geometric weight amplifies them; logsigmoid
+        # is accurate in both tails. r = softmax(gaps) is the distribution over
+        # the wrong words (0 at the target), so ||r||^2 lies in [1/(V-1), 1].
+        logits64 = logits.to(torch.float64)
+        gaps = logits64 - logits64.gather(-1, targets[..., None])
+        gaps = gaps.scatter(-1, targets[..., None], float('-inf'))
+        log_brier = 2 * torch.nn.functional.logsigmoid(
+            torch.logsumexp(gaps, dim=-1)
+        ) + torch.log1p(gaps.softmax(-1).square().sum(-1))
+
+        phis = word_embedding.to(torch.float64)
+        # Only the TARGET endpoint enters D_x, and only through its per-factor
+        # directions -- so the row scale of `word_embedding` never matters.
+        xs = phis[targets].unflatten(-1, factor_shape)
+        theta_m = thetas.unflatten(-1, factor_shape)
+        # Per-factor sphere S^{d_m-1}: a per-factor SLICE of an embedding row is
+        # not unit-norm even when the full row is, and the half-angle identities
+        # below need UNIT x_m.
+        xs = xs / xs.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
+        #   sin^2(a/2) = (1 - <x_m, theta_m>) / 2 = ||theta_m - x_m||^2 / 4
+        #   cos^2(a/2) = (1 + <x_m, theta_m>) / 2 = ||theta_m + x_m||^2 / 4
+
+        # (V, M, d): every word's per-factor direction, so the minimum below
+        # ranges over the WHOLE vocabulary instead of reading the target row.
+        phis_m = phis.unflatten(-1, factor_shape)
+        phis_m = phis_m / phis_m.square().sum(-1, keepdim=True).sqrt().clamp_min(tiny)
+        # (batch, seq, V, M) -- the vocabulary axis the min collapses.
+        sin_half_sq = (theta_m[:, :, None] - phis_m[None, None]).square().sum(-1) / 4
+        cos_half_sq = (theta_m[:, :, None] + phis_m[None, None]).square().sum(-1) / 4
+
+        kappas = thetas.new_tensor(
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
+        )
+        # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps
+        # (Invariant 4).
+        us = (kappas * rhos).clamp_max(HyperBridge.RHO_MAX)
+
+        # Broadcast u over the vocabulary axis only for the log D below; the
+        # min puts the shape back to (batch, seq, M) before the weight sum.
+        us_b = us[:, :, None]
+
+        # log D_x, with e^{+u} pulled out of the log exactly as
+        # horosphere_geometry does: D_x itself spans e^{-u} .. e^{+u}, so forming
+        # it in linear space overflows at u ~ 710 while its log never does. The
+        # clamp keeps the log finite once BOTH terms underflow (u > ~372, where
+        # sin_half_sq is exactly 0 on the target).
+        log_denoms = us_b + (
+            sin_half_sq + cos_half_sq * (-2 * us_b).exp()
+        ).clamp_min(tiny).log()
+
+        # min_v D_{e_v,m}, per factor. Minimising D maximises 1/D^2, so the
+        # result dominates the target's term factor by factor and the bound
+        # is preserved -- while no longer being a function of the target.
+        log_denoms = log_denoms.min(dim=2).values
+
+        # sum_m (d_m-1)^2 kappa_m^2 / D_{x_m}^2, accumulated in log space. Each
+        # summand reaches e^{2 RHO_MAX} ~ 1e304 on its own, so the linear sum has
+        # no headroom left; combine with log ||delta_y - p||_2^2 before
+        # exponentiating so a representable weighted loss survives even when the
+        # weight overflows.
+        dim_kappas = thetas.new_tensor([float(factor_dim - 1) for factor_dim in dims]) * kappas
+        log_weight = torch.logsumexp(2 * (dim_kappas.log() - log_denoms), dim=-1)
+        # c/2 ||delta_y - p||_2^2 * weight with c/2 = 2 (V - 1) / V: the path-KL
+        # rate's 1/2 times the smallest c with c ||.||_2^2 >= ||.||_1^2.
+        return (log_weight + log_brier + math.log(2 * (V - 1) / V)).exp()
+
     @staticmethod
     def weighted_loss_refactor(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar", prod_factor_dim=None, prod_factor_gaussian_curvature=None):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
@@ -1007,6 +1338,26 @@ class Loss:
             )
         elif loss_geometry == LossGeometry.VAR_CROSS_ENTROPY:
             bridge = Loss.bridge_loss_variational_crossentropy_refactor(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            )
+        elif loss_geometry == LossGeometry.VAR_ONE_NORM:
+            bridge = Loss.bridge_loss_variational_one_norm_refactor(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
+                prod_factor_dim=prod_factor_dim,
+                prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            )
+        elif loss_geometry == LossGeometry.VAR_BRIER:
+            bridge = Loss.bridge_loss_variational_brier_refactor(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,
