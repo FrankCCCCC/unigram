@@ -93,9 +93,15 @@ markers in their own column right of a dotted break, parked on the sharp side
 because the sharpest factor is what governs the product (report.k_sort_key).
 Their x position carries no curvature meaning.
 
+`lg-vce` (`init_test_log_vce_3d_refactor_new`) trains `var_cross_entropy`. Its
+`wloss` bounds the angular surrogate, NOT the ELBO, so it gets no `H(p)` line;
+`wnelbo_ref` is still the poincare-polar ELBO and keeps one. That project runs
+`stratified_exp` on both paths, so proposal names are read off the run tags
+rather than assumed to be `exp`.
+
 Outputs:
-  <out-dir>/{metric}_mean_{pp,ce}_{ps}.png
-  <out-dir>/{metric}_variance_{pp,ce}_{ps}.png
+  <out-dir>/{metric}_mean_{pp,ce,vce}_{ps}.png
+  <out-dir>/{metric}_variance_{pp,ce,vce}_{ps}.png
 
 CPU-only, but run it on a compute node.
 
@@ -116,15 +122,17 @@ from matplotlib import colormaps
 sys.path.insert(0, os.path.join(
   os.path.dirname(os.path.abspath(__file__)), os.pardir, 'experiments'))
 from report import (ENTROPY, REF_RATE, REF_EFF_CHECK,  # noqa: E402
-                    REF_EFF_SEVERE)  # one source of truth for H(p) and the tiers
+                    REF_EFF_SEVERE, rate_of)  # one source of truth for H(p),
+                                              # the tiers and the rate parse
 
 # `_k-<K>` is optional in a run name; this project sweeps it, so it is required
-# here. Mirrors experiments/report.py's RUN_RE.
+# here. Mirrors experiments/report.py's RUN_RE, including its lazy proposal
+# fields: `stratified_exp0.1` carries an underscore that `[^_]+` cannot match.
 RUN_RE = re.compile(
-  r'^ps-(?P<ps>.+?)_k-(?P<k>[^_]+)_lg-(?P<lg>[^_]+)_q-(?P<q>[^_]+?)'
-  r'_qref-(?P<qref>[^_]+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$')
+  r'^ps-(?P<ps>.+?)_k-(?P<k>[^_]+)_lg-(?P<lg>[^_]+)_q-(?P<q>.+?)'
+  r'_qref-(?P<qref>.+?)_lr(?P<lr>[^_]+)_st(?P<st>\d+)_s(?P<seed>\d+)$')
 
-GEOMETRIES = {'pp': 'Polar ELBO', 'ce': 'Cross-entropy'}
+GEOMETRIES = {'pp': 'Polar ELBO', 'ce': 'Cross-entropy', 'vce': 'Variational CE'}
 TEST_SIZE = 4_000_000  # draws behind each run's test_wloss_std
 # Loss proposals above this have infinite estimator variance at K = -1
 # (measured: L(t) ~ exp(-0.152 t), so the cliff sits at 2*0.152).
@@ -167,21 +175,26 @@ def sharpest(k: str) -> float:
   return max(abs(v) for v in factors(k))
 
 
+def proposal_name(q: str) -> str:
+  """`stratified_exp0.1` -> `stratified_exp`; the rate half is report.rate_of."""
+  return q[:q.rindex('exp') + 3]
+
+
 def collect(project: str, ps: str):
-  """((lg, K, rate) -> [metrics/seed], scalar Ks, product Ks, sorted rates).
+  """((lg, K, rate) -> [metrics/seed], scalar Ks, product Ks, rates, ref tags).
 
   A product-manifold run tags its factors `x`-joined (`_k--0.01x-10.0x-1.0`).
   Such a cell has no single Gaussian curvature, so it cannot sit on the log-|K|
   axis; it is returned separately and drawn in its own column past a break.
   """
-  cells, ks, rates = {}, set(), set()
+  cells, ks, rates, refs = {}, set(), set(), set()
   root = os.path.join('output', project)
   for path in sorted(glob.glob(os.path.join(root, '*', 'test_metrics.json'))):
     m = RUN_RE.match(os.path.basename(os.path.dirname(path)))
     if not m or m['ps'] != ps:
       continue
     cells.setdefault((m['lg'], m['k'], m['q']), []).append(json.load(open(path)))
-    ks.add(m['k']); rates.add(m['q'])
+    ks.add(m['k']); rates.add(m['q']); refs.add(m['qref'])
   if not cells:
     raise SystemExit(f'no runs matched ps={ps!r} under {root}/')
   scalar = sorted((k for k in ks if not is_product(k)),
@@ -192,7 +205,7 @@ def collect(project: str, ps: str):
   # flattest first: |K| ascending is left-to-right on the log x axis
   return (cells, scalar,
           sorted((k for k in ks if is_product(k)), key=sharpest),
-          sorted(rates, key=lambda q: float(q[3:])))
+          sorted(rates, key=rate_of), sorted(refs))
 
 
 def statistic(runs: list, stat: str, metric: str = 'wloss'):
@@ -248,7 +261,7 @@ def _spread_labels(ax, ends, x, side: str = 'right', min_gap_px: float = 12.0) -
 
 
 def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
-         prod_ks=()) -> str:
+         prod_ks=(), refs=()) -> str:
   fig, ax = plt.subplots(figsize=(9.4, 5.8))
   fig.patch.set_facecolor('white'); ax.set_facecolor('white')
   xs = [abs(factors(k)[0]) for k in ks]
@@ -256,7 +269,7 @@ def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
   # break instead of a place on the continuous |K| scale. Parked on the SHARP
   # side because the sharpest factor is what governs the product.
   pxs = [max(xs) * 4.0 * 2.2 ** i for i in range(len(prod_ks))]
-  lams = [float(q[3:]) for q in rates]
+  lams = [rate_of(q) for q in rates]
   norm = LogNorm(vmin=min(lams), vmax=max(lams))
   # `wloss` IS the geometry `lg` names; `wnelbo_ref` is the poincare-polar ELBO
   # on the reference path whatever the model was trained with. So H(p) is the
@@ -329,13 +342,15 @@ def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
                 xytext=(4, 6), textcoords='offset points', color=REF,
                 fontsize=9.5, fontweight='medium')
 
-  # Inside the shaded band below, the estimator standard error is the size of the
-  # value itself, so a symmetric error bar reaches <= 0 -- meaningless on a log
-  # axis, and it stretches the frame until the real signal occupies a sliver of
-  # it. Scale the frame to the MEANS (and to H(p), which must stay visible) and
-  # let those whiskers run off the top and bottom.
-  if stat == 'mean' and metric == 'wnelbo_ref' and all_y:
-    span = all_y + ([ENTROPY[ps]] if ps in ENTROPY else [])
+  # Where the estimator standard error is the size of the value itself, a
+  # symmetric error bar reaches <= 0 -- meaningless on a log axis, and it
+  # stretches the frame until the real signal occupies a sliver of it. That is
+  # wnelbo_ref inside the shaded band below, and the vce loss almost anywhere:
+  # its 1/D^2 weight is unbounded (51 of 189 cells in
+  # init_test_log_vce_3d_refactor_new). Scale the frame to the MEANS (and to
+  # H(p), when it is drawn) and let those whiskers run off the top and bottom.
+  if stat == 'mean' and (metric == 'wnelbo_ref' or lg == 'vce') and all_y:
+    span = all_y + ([ENTROPY[ps]] if measures_elbo and ps in ENTROPY else [])
     ax.set_ylim(min(span) / 1.6, max(span) * 1.6)
 
   ax.set_xlim(min(xs) * 0.6, pxs[-1] * 1.7 if pxs else max(xs) * 2.6)
@@ -383,7 +398,8 @@ def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
     # Kept short: with four footnote lines the axes shrink until a longer
     # rotated label overruns them. The title already says "reference ELBO".
     what = ('reference ELBO' if metric == 'wnelbo_ref' else
-            'negative ELBO estimate' if lg == 'pp' else 'weighted CE integral')
+            'negative ELBO estimate' if lg == 'pp' else
+            'variational CE bound' if lg == 'vce' else 'weighted CE integral')
     ylab = f'E[{metric}]   ({what}, nats)' + ('' if linear_y else '   (log scale)')
   else:
     # Kept short for wnelbo_ref: the longer name plus the extra footnote line
@@ -424,7 +440,8 @@ def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
 
   cb = fig.colorbar(ScalarMappable(norm=norm, cmap=RAMP), ax=ax, pad=0.055,
                     fraction=0.04)
-  cb.set_label('proposal rate $\\lambda$   (exp proposal, log scale)',
+  cb.set_label(f'proposal rate $\\lambda$   '
+               f'({proposal_name(rates[0])} proposal, log scale)',
                fontsize=10, color=INK_2)
   cb.set_ticks(lams)
   cb.set_ticklabels([f'{l:g}' for l in lams])
@@ -433,7 +450,8 @@ def plot(cells, ks, rates, lg, ps, stat, out, metric, model_label,
 
   tail = (f'\nError bars are the estimator standard error over {TEST_SIZE:.0e} '
           'draws.' if stat == 'mean' else '')
-  band = (f'\nShaded: pinned exp({REF_RATE:g}) reference, effective rate '
+  ref = ' / '.join(f'{proposal_name(r)}({rate_of(r):g})' for r in refs)
+  band = (f'\nShaded: pinned {ref} reference, effective rate '
           f'${REF_RATE:g}/|K|$ — light $> {REF_EFF_CHECK:g}$ (check vs the '
           f'mode=opt control), dark $\\geq {REF_EFF_SEVERE:g}$ (invalid).'
           if metric == 'wnelbo_ref' else '')
@@ -472,9 +490,9 @@ def main():
 
   out_dir = args.out_dir or os.path.join('experiments', args.project, 'imgs')
   os.makedirs(out_dir, exist_ok=True)
-  cells, ks, prod_ks, rates = collect(args.project, args.ps)
+  cells, ks, prod_ks, rates, refs = collect(args.project, args.ps)
   print(f'{args.ps}: {len(ks)} curvatures {[factors(k)[0] for k in ks]}, '
-        f'{len(rates)} rates {[float(q[3:]) for q in rates]}')
+        f'{len(rates)} rates {[rate_of(q) for q in rates]}')
   if prod_ks:
     print(f'  + {len(prod_ks)} product manifold(s), off the curvature scale: '
           f'{prod_ks} (sharpest factor |K| = '
@@ -487,7 +505,7 @@ def main():
         print(f'  [skip] no {lg} runs for ps={args.ps}')
         continue
       out = os.path.join(out_dir, f'{args.metric}_{stat}_{lg}_{args.ps}.png')
-      print(f'wrote {plot(cells, ks, rates, lg, args.ps, stat, out, args.metric, args.model_label, prod_ks)}')
+      print(f'wrote {plot(cells, ks, rates, lg, args.ps, stat, out, args.metric, args.model_label, prod_ks, refs)}')
 
 
 if __name__ == '__main__':
