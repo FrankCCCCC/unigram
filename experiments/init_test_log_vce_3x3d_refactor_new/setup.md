@@ -2,29 +2,37 @@
 
 ---
 
-- Project name: ``init_opt_test_3d_refactor_new``
-- Use ``main_refactor.py`` and scripts ``script/train/ce_redactor.sh`` and ``script/train/pp_refactor.sh``
+- Project name: ``init_test_log_vce_3x3d_refactor_new``
+- Use ``main_refactor.py`` and scripts ``script/train/vce_refactor.sh``
 
 ### Dataset
-- ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e3_exp1.0``, ``c1e4_exp1.0``}
+- ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e4_exp1.0``}
     - ``naive_ps``: [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
     - ``cmplx_ps``: [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
-    - ``c1e3_exp1.0``: exp_decay_ps(n=1000, lam=1.0)
     - ``c1e4_exp1.0``: exp_decay_ps(n=10000, lam=1.0)
 
 ### Training
-- ``hyper_dim``: 3
-- ``gaussian_curvature``: {-1.0, -2.0, -3.0, -4.0, -10.0, -0.5, -0.1, -0.05, -0.01}
-- ``loss_proposal_type``: {stratified_exp}
+- ``loss_proposal_type``: {``stratified_exp``}
 - ``loss_proposal_exp_rate``: {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
-- ``loss_geometry``: {``cross_entropy``, ``poincare_polar``, ``var_cross_entropy``}
+- ``loss_geometry``: {``var_cross_entropy``}
+- Product Manifold:
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -10.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -0.01, -0.01])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.05, -0.05, -0.05])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.1, -0.1, -0.1])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.5, -0.5, -0.5])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-1.0, -1.0, -1.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-2.0, -2.0, -2.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-3.0, -3.0, -3.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-4.0, -4.0, -4.0])
+    - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-10.0, -10.0, -10.0])
 - ``lr``: 0.001
 - ``max_steps``: {20000}
 - ``gradient_clip_val``: 1.0
 - ``test_size``: 4000000
 - ``batch_size``: 2048
 - ``seed``: {0, 1, 2}
-- ``mode``: ``opt``
+- ``mode``: ``tnb``
 
 ### Ref ELBO & CE
 - ``ref_proposal_type``: stratified_exp

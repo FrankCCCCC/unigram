@@ -13,9 +13,9 @@
     - ``c1e4_exp1.0``: exp_decay_ps(n=10000, lam=1.0)
 
 ### Training
-- ``loss_proposal_type``: {exp}
+- ``loss_proposal_type``: {stratified_exp}
 - ``loss_proposal_exp_rate``: {0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0}
-- ``loss_geometry``: {``cross_entropy``, ``poincare_polar``}
+- ``loss_geometry``: {``cross_entropy``, ``poincare_polar``, ``var_cross_entropy``}
 - Product Manifold:
     - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -10.0, -1.0])
     - (prod_factor_dim: [3,3,3], prod_factor_gaussian_curvature: [-0.01, -0.01, -0.01])
@@ -36,7 +36,7 @@
 - ``mode``: ``opt``
 
 ### Ref ELBO & CE
-- ``ref_proposal_type``: exp
+- ``ref_proposal_type``: stratified_exp
 - ``ref_proposal_exp_rate``: 0.1
 
 ### Result Presentation
