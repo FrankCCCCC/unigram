@@ -42,6 +42,8 @@ Read Agent.md and Refer to /home/sc3379/workspace/research/unigram-dev/unigram/e
 
 Use any GPUs in the cluster, use small GPU like 2080ti etc as many as possible to avoid preempt by priviledged users. If Desa and thickstun partitions have available GPUs, use them.
 
+Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_3x3d_ada_prod/imgs, My Intuitition is that since the word embedding concentrates on single or bi-pole, which induce oval geometry, single global curvature might not be the best option for this situation, an adaptive curvature on different direction should yield a oval geometry, suitable to this word embedding.
+
 ---
 
 # Results
