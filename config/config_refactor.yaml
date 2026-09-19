@@ -28,6 +28,9 @@ prod_factor_gaussian_curvature: null
 
 hidden_size: 128
 depth: 3
+# null, or a path to a saved table / state_dict with `lm_head.weight` (the
+# `model.pt` a tnb run writes): reuse a learned geometry in either mode.
+word_embedding: null
 # The lm_head rows ARE the boundary table the bridge, the loss and the model's
 # own horosphere readout all read, so this freezes the geometry as well as the
 # readout -- there is no "pinned angles, trainable head" split here.

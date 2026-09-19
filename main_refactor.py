@@ -54,6 +54,8 @@ class HyperbolicDLMRefactor(BaseTrainer):
             )
         )
 
+        word_embedding = self.handle_word_embedding(getattr(config, "word_embedding", None))
+
         if self.config.mode == "tnb":
             self.model = MLPLMRefactor(
                 vocab_size=config.vocab_size,
@@ -70,6 +72,7 @@ class HyperbolicDLMRefactor(BaseTrainer):
                 unif_word_embedding=config.unif_word_embedding,
                 prod_factor_dim=self.prod_factor_dim,
                 prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+                word_embedding=word_embedding,
             )
             if not config.trainable_word_embedding:
                 # Unlike main.py there is no "pinned angles, trainable head"
@@ -84,6 +87,7 @@ class HyperbolicDLMRefactor(BaseTrainer):
                 embedding_size=self.embedding_size,
                 prod_factor_dim=self.prod_factor_dim,
                 prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+                word_embedding=word_embedding,
             )
         else:
             raise ValueError(f"mode shouldn't be {self.config.mode}, only support tnb and opt.")
@@ -101,6 +105,36 @@ class HyperbolicDLMRefactor(BaseTrainer):
         return torch.optim.Adam(
             [p for p in self.parameters() if p.requires_grad], lr=float(self.config.lr)
         )
+
+    def handle_word_embedding(
+        self, word_embedding: Optional[Union[str, torch.Tensor]]
+    ) -> Optional[torch.Tensor]:
+        """Resolve `config.word_embedding` into a boundary table, or None.
+
+        A string is a path to a saved tensor, or to a state_dict holding
+        `lm_head.weight` -- the `model.pt` a finished tnb run writes. Loaded
+        verbatim: every consumer renormalizes per factor, so the row scale
+        reaches nothing but MLPLMRefactor's residual logits.
+        """
+        if word_embedding is None:
+            return None
+        if isinstance(word_embedding, str):
+            loaded = torch.load(word_embedding, map_location="cpu")
+            if isinstance(loaded, dict):
+                loaded = loaded["lm_head.weight"]
+        elif torch.is_tensor(word_embedding):
+            loaded = word_embedding
+        else:
+            raise ValueError(
+                f"word_embedding must be a tensor or a path to one; got {type(word_embedding)}."
+            )
+        # Without this, copy_ silently broadcasts a (1, E) table over every row.
+        expected = (int(self.config.vocab_size), self.embedding_size)
+        if tuple(loaded.shape) != expected:
+            raise ValueError(
+                f"word_embedding must have shape {expected}; got {tuple(loaded.shape)}."
+            )
+        return loaded.detach()
 
     @property
     def word_embedding(self) -> torch.Tensor:

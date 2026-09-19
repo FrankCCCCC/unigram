@@ -508,6 +508,7 @@ class MLPLMRefactor(HyperbolicModelBase):
         unif_word_embedding: bool = False,
         prod_factor_dim: Optional[List[int]] = None,
         prod_factor_gaussian_curvature: Optional[List[float]] = None,
+        word_embedding: Optional[torch.FloatTensor] = None,
     ):
         super().__init__()
         if not (input_theta_dim == output_theta_dim == embedding_size):
@@ -547,6 +548,8 @@ class MLPLMRefactor(HyperbolicModelBase):
         self.prod_factor_dim: Optional[Union[int, List[int]]] = prod_factor_dim
         self.prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = prod_factor_gaussian_curvature
 
+        if unif_word_embedding and word_embedding is not None:
+            raise ValueError("unif_word_embedding does not accept a provided word_embedding.")
         self.lm_head = nn.Linear(embedding_size, vocab_size, bias=False)
         if unif_word_embedding:
             # lm_head.weight IS the word embedding the bridge and loss read: each
@@ -558,6 +561,10 @@ class MLPLMRefactor(HyperbolicModelBase):
                 self.lm_head.weight.copy_(
                     uniform_sphere_points(vocab_size, embedding_size).to(self.lm_head.weight.dtype)
                 )
+        elif word_embedding is not None:
+            # Seeds the same rows, so it fixes the geometry as well as the readout.
+            with torch.no_grad():
+                self.lm_head.weight.copy_(word_embedding.to(self.lm_head.weight.dtype))
 
     @property
     def word_embedding(self) -> torch.Tensor:
@@ -607,10 +614,7 @@ class OptimalModelRefactor(HyperbolicModelBase):
     optimal logits for the bridge losses, since
     `softmax(horosphere_dists + log_ps)` recovers the true posterior
     q(y | x_t) ∝ p(y) · prod_i (Poisson kernel)_i. Nothing is trained, so the
-    trunk is a constant and `lm_head` is the identity, and the boundary table is
-    a frozen `uniform_sphere_points` draw held as a buffer -- not a Parameter,
-    so it never takes a gradient, and it is the same table the bridge and the
-    loss use for their own reference geometry.
+    trunk is a constant and `lm_head` is the identity.
     """
 
     def __init__(
@@ -619,6 +623,7 @@ class OptimalModelRefactor(HyperbolicModelBase):
         embedding_size: int,
         prod_factor_dim: Optional[List[int]] = None,
         prod_factor_gaussian_curvature: Optional[List[float]] = None,
+        word_embedding: Optional[torch.FloatTensor] = None,
     ):
         super().__init__()
         ps = torch.as_tensor(ps, dtype=torch.float64)
@@ -636,13 +641,16 @@ class OptimalModelRefactor(HyperbolicModelBase):
             prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             embedding_size=embedding_size,
         )
-        # Frozen boundary table: unit rows spread uniformly over the sphere, the
-        # same draw HyperBridge._vocab_angles falls back to, so the reference
-        # model's geometry matches the bridge's word -> direction map exactly. A
+        # Frozen boundary table: a pretrained `word_embedding` when given, else
+        # unit rows spread uniformly over the sphere, the same draw
+        # HyperBridge._vocab_angles falls back to, so the reference model's
+        # geometry matches the bridge's word -> direction map exactly. A
         # buffer, so .to(device) carries it and no optimizer ever sees it.
         self.register_buffer(
             "_word_embedding",
-            uniform_sphere_points(self.vocab_size, embedding_size, dtype=torch.float64),
+            uniform_sphere_points(self.vocab_size, embedding_size, dtype=torch.float64)
+            if word_embedding is None
+            else word_embedding.to(torch.float64),
         )
         print(f"self.ps: {self.log_ps.exp()}")
         print(f"self.log_ps: {self.log_ps}")
