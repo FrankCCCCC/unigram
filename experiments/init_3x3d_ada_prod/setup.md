@@ -1,4 +1,4 @@
-## ELBO Mean and Variance for Adaptive Product Manifold with 3 Seeds Avg
+## ELBO Mean and Variance for Adaptive Product Manifold with 3 Seeds Avg, Trainable Model
 
 ---
 
@@ -37,6 +37,10 @@
 # TODO
 
 Read Agent.md and Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_test_3x3d_refactor_new and /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_test_3x3d_refactor_new , vary the curvature of every component of  prod_factor_gaussian_curvature to achieve as low test_wnelbo_ref_std (poincare_polar) variance(std) as possible while tight test_wnelbo_ref to the training dataset entropy.
+
+Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_3x3d_ada_prod/imgs, My Intuitition is that since the word embedding concentrates on single or bi-pole, which induce oval geometry, single global curvature might not be the best option for this situation, an adaptive curvature on different direction should yield a oval geometry, suitable to this word embedding.
+
+Prioritize Desa and thickstun GPUs, then, use 2080ti (or other small memory GPUs, make sure the numerical results are consistent across all different gpus) on other partitions to avoid preempt, finish the jobs ASAP
 
 ---
 

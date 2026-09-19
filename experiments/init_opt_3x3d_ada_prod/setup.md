@@ -1,4 +1,4 @@
-## ELBO Mean and Variance for Adaptive Product Manifold with 3 Seeds Avg
+## ELBO Mean and Variance for Adaptive Product Manifold with 3 Seeds Avg, Optimal Model
 
 ---
 
@@ -6,9 +6,7 @@
 - Use ``main_refactor.py`` and scripts ``script/train/ce_redactor.sh`` and ``script/train/pp_refactor.sh``
 
 ### Dataset
-- ``ps``: {``naive_ps``, ``cmplx_ps``, ``c1e4_exp1.0``}
-    - ``naive_ps``: [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
-    - ``cmplx_ps``: [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
+- ``ps``: {``c1e4_exp1.0``}
     - ``c1e4_exp1.0``: exp_decay_ps(n=10000, lam=1.0)
 
 ### Training
@@ -38,51 +36,11 @@
 
 # TODO
 
-Read Agent.md and Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_test_3x3d_refactor_new and /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_test_3x3d_refactor_new , vary the curvature of every component of  prod_factor_gaussian_curvature to achieve as low test_wloss_ref_std (poincare_polar) variance(std) as possible while tight test_wloss_ref to the training dataset entropy. Do the same thing for 3 different word embeddings. Find the lowest test_wloss_ref_std for each word embedding while tight test_wloss_ref to the training dataset entropy.
+Read Agent.md and Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_test_3x3d_refactor_new and /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_test_3x3d_refactor_new , vary the curvature of every component of  prod_factor_gaussian_curvature to achieve as low test_wloss_std (poincare_polar) variance(std) as possible while tight test_wloss to the training dataset entropy. Do the same thing for 3 different word embeddings. Find the lowest test_wloss_std for each word embedding while tight test_wloss to the training dataset entropy.
 
 Use any GPUs in the cluster, use small GPU like 2080ti etc as many as possible to avoid preempt by priviledged users. If Desa and thickstun partitions have available GPUs, use them.
 
 Refer to /home/sc3379/workspace/research/unigram-dev/unigram/experiments/init_opt_3x3d_ada_prod/imgs, My Intuitition is that since the word embedding concentrates on single or bi-pole, which induce oval geometry, single global curvature might not be the best option for this situation, an adaptive curvature on different direction should yield a oval geometry, suitable to this word embedding.
-
----
-
-# Results
-
----
-
-## naive_ps, Training Step 20000
-
-Each cell: avg & std across seed
-
-**CE**
-
-| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
-|---|---|---|---|---|---|---|
-
-**Polar ELBO**
-
-| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
-|---|---|---|---|---|---|---|
-
----
-
-# Results
-
----
-
-## cmplx_ps, Training Step 20000
-
-Each cell: avg & std across seed
-
-**CE**
-
-| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
-|---|---|---|---|---|---|---|
-
-**Polar ELBO**
-
-| loss Proposal | wloss | wnelbo_ref | wce_ref | nelbo_ref | ce_ref | 
-|---|---|---|---|---|---|---|
 
 ---
 
